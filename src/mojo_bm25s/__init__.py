@@ -71,4 +71,26 @@ def score_idf(
     return _kernel.score_idf(method, df, n, allow_negative)
 
 
-__all__ = ["hello", "score_tfc", "score_idf"]
+def topk(
+    scores: np.ndarray, k: int, algorithm: str = "heap"
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the top-k highest scores and their original indices.
+
+    ``algorithm`` is ``"heap"`` (O(N log k) min-heap, faster for small k)
+    or ``"quickselect"`` (O(N) average, faster for large k or large N).
+    Output is ``(scores, indices)`` of dtypes ``(float32, int32)``,
+    sorted by descending score. Tie-breaking at the rank-k boundary is
+    implementation-defined — matches `bm25s.selection.topk(backend='numpy')`
+    on scores but may disagree on indices when boundary scores are equal.
+    """
+    arr = np.ascontiguousarray(scores, dtype=np.float32)
+    if k <= 0:
+        raise ValueError(f"k must be positive, got {k}")
+    if k > arr.shape[0]:
+        raise ValueError(
+            f"k={k} exceeds input length {arr.shape[0]}"
+        )
+    return _kernel.topk(algorithm, arr, k)
+
+
+__all__ = ["hello", "score_tfc", "score_idf", "topk"]
