@@ -1,25 +1,35 @@
 # Phase 2 decision
 
-## TL;DR — **Hold**
+## TL;DR — **Hold** (Path A tried; trigger still not met; Path B is the
+remaining unknown)
 
-Pre-registered trigger is not met from current evidence, but the
-current evidence is not yet sufficient to make either a clean Go or
-a clean No-go call. Two well-scoped follow-ups would each give
-decisive evidence.
+Path A (batch the entire retrieve loop into one Mojo entry point)
+shipped in PR #18 and delivered a real 2.3× Mojo speedup on scifact.
+But the apples-to-apples re-measurement (numba's batched native path
+was being measured at batch-of-one previously, disadvantaging it)
+showed numba is even further ahead than the original PHASE2.md
+suggested. **Trigger (a) remains decisively not met.** Trigger (b)
+remains unmeasured.
 
 ## 1. Numbers
 
-From `benchmarks/results.md` (full table + hardware caveats there).
+From `benchmarks/results.md` (full table + methodology + caveats).
 Three backends, same `bm25s` retrieve hot path, parity-verified
-against bm25s and `rank_bm25` (see `tests/parity/`).
+against bm25s and `rank_bm25` (see `tests/parity/` and
+`tests/test_retrieve_batch.py`).
 
 | dataset | corpus | numpy QPS | numba QPS | mojo QPS | **mojo / numba** |
 |---|---|---|---|---|---|
-| BEIR scifact | 5,183 | 10,646 | 26,305 | 13,151 | **0.50×** |
-| BEIR trec-covid | 171,332 | 248 | 2,259 | 766 | **0.34×** |
+| BEIR scifact | 5,183 | 9,268 | 66,468 | 30,555 | **0.46×** |
+| BEIR trec-covid | 171,332 | 224 | 2,796 | 991 | **0.35×** |
 
-Mojo is 1.2–3.1× faster than numpy (gap widens at scale, as
-expected). Mojo is 2–3× slower than numba on both datasets.
+Mojo is 3.3–4.4× faster than numpy. Mojo is **2.2–2.8× slower than
+numba** on x86.
+
+The pre-Path-A version of this file reported mojo/numba ratios of 0.50
+(scifact) and 0.34 (trec-covid); the ratios barely moved because Path A
+fixed Mojo's batching while the methodology change also gave numba its
+proper batched measurement. Both backends are now measured fairly.
 
 Hardware: CCotw container, Intel Xeon @ 2.10 GHz, 4 cores, Linux
 x86_64. **This is not benchmarking hardware** — see Caveats below.
@@ -32,85 +42,84 @@ x86_64. **This is not benchmarking hardware** — see Caveats below.
 
 ## 3. Decision: **Hold**
 
-**Trigger (a)** is definitively not met on x86. The numbers aren't
-close — Mojo would need ~3× improvement to reach the 1.3× threshold
-even on the dataset where it does best. Better hardware will not
-close that gap by itself; the bottleneck (see §5) is the Python ↔
-Mojo per-call boundary cost, not the SIMD math.
+**Trigger (a)** is decisively not met on x86. We tried Path A — the
+boundary-cost engineering that the pre-Path-A version of this file
+named as the most likely lever — and confirmed the diagnosis (2.3×
+Mojo speedup on scifact) without closing the ratio. The remaining
+gap is structural to numba's LLVM-autovec lineage on x86, in the
+scatter loop specifically. SIMD-vectorizing the scatter doesn't
+help much (random writes; cache misses dominate); numba's edge
+comes from LLVM's x86-tuned codegen on exactly this loop pattern.
 
-**Trigger (b)** can't be evaluated yet — we have no ARM / Apple
-Silicon numbers. (b) was written precisely because Numba's
+**Trigger (b)** still can't be evaluated — we have no ARM / Apple
+Silicon numbers. (b) was written precisely because numba's
 LLVM-autovec advantage is x86-specific; on ARM the gap should
 narrow, and Mojo's SIMD-portability story becomes the differentiator.
 Without the ARM number, we'd be guessing.
 
-A **Go** call right now would be moving the goalposts: trigger (a)
-plainly fails, trigger (b) is unmeasured, and the issue explicitly
-pre-registered the threshold "so we don't move the goalposts after
-seeing numbers." A **No-go** call right now would be premature: it
-would commit to closing the project on incomplete evidence
-(specifically the missing ARM number that trigger (b) was built to
-capture).
+A **Go** call right now would still move the goalposts: trigger (a)
+plainly fails, trigger (b) is unmeasured. A **No-go** call right now
+would still archive on incomplete evidence (the missing ARM number
+that (b) was built to capture).
 
-**Hold** = neither Go nor No-go yet. Project stays alive; one of
-the two paths in §4 produces decisive evidence; we re-decide.
+**Hold** preserves both options pending Path B evidence.
 
-## 4. Paths back to a decision
-
-Either of these would supply the missing evidence and flip the call
-to Go or No-go without goalpost movement.
+## 4. Status of the two paths
 
 ### Path A — close trigger (a) on x86
 
-The current bottleneck isn't the SIMD math, it's that every
-`retrieve()` call crosses Python ↔ Mojo at least three times
-(`csc_score` → produce score vector, `topk` → select rank-k,
-back through bm25s framing for masking/nonoccurrence). Numba's
-JIT inlines all of that into one function. The Mojo equivalent
-would be batching the entire retrieve loop into one Mojo entry
-point: take a list of query token-id arrays, return a `(scores,
-ids)` matrix, no Python crossings in between.
+**Tried in PR #18.** Single Mojo kernel `retrieve_batch_into` that
+does scatter + topk for an entire query batch in one Python ↔ Mojo
+crossing. New Python facade `mojo_bm25s.retrieve_batch(retriever,
+queries, k)`. Parity vs the per-query patch verified on a 12-query
+synthetic corpus across k ∈ {1, 3, 10}; the existing 25-combo
+scifact parity suite continues to pass.
 
-Estimate: one focused PR. If the resulting Mojo QPS clears 1.3× of
-the numbers in §1 on either dataset, trigger (a) is met → Go.
+Result: 2.3× Mojo speedup on scifact, 1.3× on trec-covid. **Trigger
+(a) not met** — mojo is still 0.35–0.46× of numba on x86. No
+further x86-side engineering looks likely to close the remaining gap;
+the scatter loop is the bottleneck, and it's where numba's LLVM
+codegen specifically excels.
 
 ### Path B — measure trigger (b) on ARM
 
-Re-run `benchmarks/run.py --all-backends` on Apple Silicon or
-Linux ARM. If Mojo is within 10% of Numba on either BEIR dataset,
-trigger (b) is met → Go.
+**Not yet tried.** Zero code change required: re-run
+`benchmarks/run.py --all-backends` on Apple Silicon or Linux ARM.
+If Mojo is within 10% of numba on either BEIR dataset, trigger (b)
+is met → Go.
 
-No additional code needed; just a host with a different ISA.
+This is now **the only remaining evidence source** that could flip
+the decision out of Hold without goalpost movement.
 
-### If both paths fail
+### If Path B also fails
 
 No-go: archive the project per the issue's No-go branch
 (`RETROSPECTIVE.md` + README update). Phase 1 was still useful —
-the kernels work, the parity tests are solid, the bench harness
-is reusable. Just doesn't justify the standalone-library scope of
-Phase 2.
+the kernels work, the parity tests are solid, the bench harness is
+reusable, the boundary-cost diagnosis is documented. Just doesn't
+justify the standalone-library scope of Phase 2.
 
 ## 5. Caveats on the current numbers
 
 - **CCotw container is not benchmarking hardware.** Shared Xeon,
   variable frequency, no thermal isolation. Absolute QPS numbers
-  are noisy by maybe 10–20%; the relative ordering between
-  backends is stable across repeated runs but worth re-verifying
-  on real hardware.
+  are noisy by maybe 10–20%; the relative ordering between backends
+  is stable across repeated runs but worth re-verifying on real
+  hardware.
 - **Numba's x86 lead is part of what we're measuring.** Numba uses
-  LLVM with full x86 autovectorization. On ARM that lead shrinks
-  meaningfully — exactly why trigger (b) exists.
-- **The Mojo wrappers are scalar at the buffer level.** The
-  per-element loop in `score_tfc` and `score_idf_array` runs at
-  `simd_width=1`. Lifting to native SIMD width (4 or 8 for
-  float32) would give a constant-factor speedup on the *inner*
-  math but wouldn't close the boundary-cost gap. Mentioned for
-  completeness; it's not the right next lever.
+  LLVM with full x86 autovectorization on the scatter loop in
+  particular. On ARM that lead shrinks meaningfully — exactly why
+  trigger (b) exists.
+- **The Mojo CSC scatter loop is scalar.** Loop body is one indexed
+  read + one indexed write per data element. SIMD scatter (`vpscatterdps`)
+  doesn't help much when the write pattern is irregular — cache
+  misses dominate. This is a Mojo-vs-LLVM-codegen-on-x86 problem,
+  not something a Mojo-side optimization is likely to close.
 
 ## 6. Recommended next step
 
-Run Path B first — zero code change, immediate evidence on the
-trigger that was specifically written to test Mojo's
-differentiation. If Path B clears (b), Go. If Path B doesn't,
-decide whether the Path-A engineering investment is worth it
-based on what the ARM numbers actually look like.
+Run Path B. It's free — no new code, just a host with a different
+ISA. If it clears (b), Go. If it doesn't, No-go and archive.
+
+The Path A engineering investment has already been made and is
+reusable for Phase 2 if it gets built; it isn't wasted either way.

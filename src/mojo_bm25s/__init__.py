@@ -197,6 +197,83 @@ def csc_score_into(
     return None
 
 
+def retrieve_batch(
+    retriever,
+    query_tokens_batch,
+    k: int = 10,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Batched retrieve in a single Mojo call — Path A from PHASE2.md.
+
+    ``retriever`` is an indexed ``bm25s.BM25``. ``query_tokens_batch``
+    is a list of queries; each query is either a list of token strings
+    (which we convert via ``retriever.get_tokens_ids``) or a numpy/list
+    of int token IDs.
+
+    Returns ``(scores: float32[batch, k], ids: int32[batch, k])`` sorted
+    descending per row. Same parity guarantees as the per-query
+    ``patch_bm25s`` path (identical scores within float32 tolerance, IDs
+    in the rank-k tie class).
+
+    The point of this entry point is to amortize the Python ↔ Mojo
+    per-call cost: where the per-query patch crosses the boundary
+    O(n_queries) times, this crosses exactly once per batch.
+    """
+    if k <= 0:
+        raise ValueError(f"k must be positive, got {k}")
+
+    token_id_batch: list[np.ndarray] = []
+    for q in query_tokens_batch:
+        if len(q) == 0:
+            token_id_batch.append(np.zeros(0, dtype=np.int32))
+        elif isinstance(q[0], str):
+            ids = retriever.get_tokens_ids(q)
+            token_id_batch.append(np.asarray(ids, dtype=np.int32))
+        else:
+            token_id_batch.append(np.asarray(q, dtype=np.int32))
+
+    batch_size = len(token_id_batch)
+    lengths = np.fromiter(
+        (q.shape[0] for q in token_id_batch), dtype=np.int32, count=batch_size,
+    )
+    offsets = np.zeros(batch_size + 1, dtype=np.int32)
+    np.cumsum(lengths, out=offsets[1:])
+
+    if batch_size > 0:
+        queries_concat = np.ascontiguousarray(
+            np.concatenate(token_id_batch), dtype=np.int32,
+        )
+    else:
+        queries_concat = np.zeros(0, dtype=np.int32)
+
+    data = np.ascontiguousarray(retriever.scores["data"], dtype=np.float32)
+    indptr = np.ascontiguousarray(retriever.scores["indptr"], dtype=np.int32)
+    indices = np.ascontiguousarray(retriever.scores["indices"], dtype=np.int32)
+    n_docs = int(retriever.scores["num_docs"])
+
+    scores_out = np.zeros((batch_size, k), dtype=np.float32)
+    ids_out = np.zeros((batch_size, k), dtype=np.int32)
+
+    _kernel.retrieve_batch(
+        (
+            int(data.__array_interface__["data"][0]),
+            int(indptr.__array_interface__["data"][0]),
+            int(indices.__array_interface__["data"][0]),
+            int(n_docs),
+        ),
+        (
+            int(queries_concat.__array_interface__["data"][0]),
+            int(offsets.__array_interface__["data"][0]),
+            int(batch_size),
+        ),
+        (
+            int(scores_out.__array_interface__["data"][0]),
+            int(ids_out.__array_interface__["data"][0]),
+            int(k),
+        ),
+    )
+    return scores_out, ids_out
+
+
 from .patch import patch_bm25s  # noqa: E402
 
 
@@ -208,5 +285,6 @@ __all__ = [
     "topk",
     "csc_score",
     "csc_score_into",
+    "retrieve_batch",
     "patch_bm25s",
 ]

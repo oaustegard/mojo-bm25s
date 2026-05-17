@@ -28,6 +28,7 @@ from scoring import (
 )
 from topk import topk_heap_impl, topk_quickselect_impl
 from csc import csc_score_into
+from retrieve import retrieve_batch_into
 
 
 def hello() raises -> PythonObject:
@@ -266,6 +267,58 @@ def csc_score(
     return PythonObject(None)
 
 
+def retrieve_batch(
+    matrix_args: PythonObject,
+    queries_args: PythonObject,
+    out_args: PythonObject,
+) raises -> PythonObject:
+    """Batched retrieve entry point: one Mojo crossing per batch.
+
+    Three tuple-packed argument groups (to fit the 6-arg `def_function`
+    cap and to keep related pointers together):
+
+    - ``matrix_args = (data_ptr, indptr_ptr, indices_ptr, n_docs)``
+    - ``queries_args = (queries_concat_ptr, queries_offsets_ptr, batch_size)``
+    - ``out_args = (scores_out_ptr, ids_out_ptr, k)``
+
+    All pointers are integer addresses (`arr.__array_interface__["data"][0]`).
+    The Python shim in `__init__.py` does all the marshaling.
+    """
+    var data = UnsafePointer[Float32, MutExternalOrigin](
+        unsafe_from_address=Int(py=matrix_args[0])
+    )
+    var indptr = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=matrix_args[1])
+    )
+    var indices = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=matrix_args[2])
+    )
+    var n_docs = Int(py=matrix_args[3])
+
+    var queries = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=queries_args[0])
+    )
+    var offsets = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=queries_args[1])
+    )
+    var batch = Int(py=queries_args[2])
+
+    var scores_out = UnsafePointer[Float32, MutExternalOrigin](
+        unsafe_from_address=Int(py=out_args[0])
+    )
+    var ids_out = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=out_args[1])
+    )
+    var k = Int(py=out_args[2])
+
+    retrieve_batch_into(
+        data, indptr, indices, n_docs,
+        queries, offsets, batch,
+        k, scores_out, ids_out,
+    )
+    return PythonObject(None)
+
+
 @export
 def PyInit_kernel() -> PythonObject:
     try:
@@ -276,6 +329,7 @@ def PyInit_kernel() -> PythonObject:
         m.def_function[score_idf_array]("score_idf_array")
         m.def_function[topk]("topk")
         m.def_function[csc_score]("csc_score")
+        m.def_function[retrieve_batch]("retrieve_batch")
         return m.finalize()
     except e:
         abort(String("failed to create module: ", e))
