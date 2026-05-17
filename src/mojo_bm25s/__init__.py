@@ -93,4 +93,40 @@ def topk(
     return _kernel.topk(algorithm, arr, k)
 
 
-__all__ = ["hello", "score_tfc", "score_idf", "topk"]
+def csc_score(
+    data: np.ndarray,
+    indptr: np.ndarray,
+    indices: np.ndarray,
+    query_token_ids: np.ndarray,
+    n_docs: int,
+) -> np.ndarray:
+    """CSC retrieve hot path: scatter-accumulate columns into a score vector.
+
+    Parameters mirror ``bm25s.scoring._compute_relevance_from_scores_legacy``
+    but reordered to put the query last (Mojo kernels take the immutable
+    matrix data first). Returns a fresh ``np.zeros(n_docs, dtype=float32)``
+    populated by summing ``data[j]`` into ``scores[indices[j]]`` for each
+    column referenced by ``query_token_ids``.
+
+    Arrays are coerced to contiguous float32 (data) / int32 (indptr,
+    indices, query_token_ids) before being passed to the Mojo kernel via
+    raw buffer pointers — no Python-level per-element iteration.
+    """
+    data = np.ascontiguousarray(data, dtype=np.float32)
+    indptr = np.ascontiguousarray(indptr, dtype=np.int32)
+    indices = np.ascontiguousarray(indices, dtype=np.int32)
+    query = np.ascontiguousarray(query_token_ids, dtype=np.int32)
+    scores = np.zeros(int(n_docs), dtype=np.float32)
+
+    _kernel.csc_score(
+        int(data.__array_interface__["data"][0]),
+        int(indptr.__array_interface__["data"][0]),
+        int(indices.__array_interface__["data"][0]),
+        int(query.__array_interface__["data"][0]),
+        int(query.shape[0]),
+        (int(scores.__array_interface__["data"][0]), int(n_docs)),
+    )
+    return scores
+
+
+__all__ = ["hello", "score_tfc", "score_idf", "topk", "csc_score"]
