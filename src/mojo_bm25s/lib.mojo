@@ -386,11 +386,12 @@ def retrieve_batch(
     )
     var k = Int(py=out_args[2])
     var num_workers = Int(py=out_args[3])
+    var path_mode = Int(py=out_args[4])
 
     retrieve_batch_into(
         data, indptr, indices, n_docs,
         queries, offsets, batch,
-        k, scores_out, ids_out, num_workers,
+        k, scores_out, ids_out, num_workers, path_mode,
     )
     return PythonObject(None)
 
