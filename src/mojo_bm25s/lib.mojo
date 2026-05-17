@@ -28,6 +28,7 @@ from scoring import (
 )
 from topk import topk_heap_impl, topk_quickselect_impl
 from csc import csc_score_into
+from retrieve import retrieve_batch_into
 
 
 def hello() raises -> PythonObject:
@@ -68,26 +69,65 @@ def score_tfc(
         unsafe_from_address=Int(py=result.__array_interface__["data"][0])
     )
 
+    # SIMD-lifted: process 8 float32 lanes per iteration via vector
+    # load/store, with a scalar tail. Dispatch on method runs once;
+    # the inner body is pure SIMD math.
+    alias W = 8
     if m == "robertson":
-        for i in range(n):
+        var i = 0
+        while i + W <= n:
+            var v = (tf_ptr + i).load[width=W]()
+            var r = _tfc_robertson[W](v, l_d, l_avg, k1, b, delta)
+            (out_ptr + i).store(r)
+            i += W
+        while i < n:
             var v = SIMD[DType.float32, 1](tf_ptr[i])
             out_ptr[i] = _tfc_robertson[1](v, l_d, l_avg, k1, b, delta)[0]
+            i += 1
     elif m == "lucene":
-        for i in range(n):
+        var i = 0
+        while i + W <= n:
+            var v = (tf_ptr + i).load[width=W]()
+            var r = _tfc_lucene[W](v, l_d, l_avg, k1, b, delta)
+            (out_ptr + i).store(r)
+            i += W
+        while i < n:
             var v = SIMD[DType.float32, 1](tf_ptr[i])
             out_ptr[i] = _tfc_lucene[1](v, l_d, l_avg, k1, b, delta)[0]
+            i += 1
     elif m == "atire":
-        for i in range(n):
+        var i = 0
+        while i + W <= n:
+            var v = (tf_ptr + i).load[width=W]()
+            var r = _tfc_atire[W](v, l_d, l_avg, k1, b, delta)
+            (out_ptr + i).store(r)
+            i += W
+        while i < n:
             var v = SIMD[DType.float32, 1](tf_ptr[i])
             out_ptr[i] = _tfc_atire[1](v, l_d, l_avg, k1, b, delta)[0]
+            i += 1
     elif m == "bm25l":
-        for i in range(n):
+        var i = 0
+        while i + W <= n:
+            var v = (tf_ptr + i).load[width=W]()
+            var r = _tfc_bm25l[W](v, l_d, l_avg, k1, b, delta)
+            (out_ptr + i).store(r)
+            i += W
+        while i < n:
             var v = SIMD[DType.float32, 1](tf_ptr[i])
             out_ptr[i] = _tfc_bm25l[1](v, l_d, l_avg, k1, b, delta)[0]
+            i += 1
     elif m == "bm25+":
-        for i in range(n):
+        var i = 0
+        while i + W <= n:
+            var v = (tf_ptr + i).load[width=W]()
+            var r = _tfc_bm25plus[W](v, l_d, l_avg, k1, b, delta)
+            (out_ptr + i).store(r)
+            i += W
+        while i < n:
             var v = SIMD[DType.float32, 1](tf_ptr[i])
             out_ptr[i] = _tfc_bm25plus[1](v, l_d, l_avg, k1, b, delta)[0]
+            i += 1
     else:
         raise Error(String("unknown TFC method: ", m))
 
@@ -139,26 +179,62 @@ def score_idf_array(
         unsafe_from_address=Int(py=out_ptr)
     )
 
+    alias W = 8
     if m == "robertson":
-        for i in range(n):
+        var i = 0
+        while i + W <= n:
+            var v = (df + i).load[width=W]()
+            var r = _idf_robertson[W](v, nd, allow_neg)
+            (out + i).store(r)
+            i += W
+        while i < n:
             var v = SIMD[DType.float32, 1](df[i])
             out[i] = _idf_robertson[1](v, nd, allow_neg)[0]
+            i += 1
     elif m == "lucene":
-        for i in range(n):
+        var i = 0
+        while i + W <= n:
+            var v = (df + i).load[width=W]()
+            var r = _idf_lucene[W](v, nd)
+            (out + i).store(r)
+            i += W
+        while i < n:
             var v = SIMD[DType.float32, 1](df[i])
             out[i] = _idf_lucene[1](v, nd)[0]
+            i += 1
     elif m == "atire":
-        for i in range(n):
+        var i = 0
+        while i + W <= n:
+            var v = (df + i).load[width=W]()
+            var r = _idf_atire[W](v, nd)
+            (out + i).store(r)
+            i += W
+        while i < n:
             var v = SIMD[DType.float32, 1](df[i])
             out[i] = _idf_atire[1](v, nd)[0]
+            i += 1
     elif m == "bm25l":
-        for i in range(n):
+        var i = 0
+        while i + W <= n:
+            var v = (df + i).load[width=W]()
+            var r = _idf_bm25l[W](v, nd)
+            (out + i).store(r)
+            i += W
+        while i < n:
             var v = SIMD[DType.float32, 1](df[i])
             out[i] = _idf_bm25l[1](v, nd)[0]
+            i += 1
     elif m == "bm25+":
-        for i in range(n):
+        var i = 0
+        while i + W <= n:
+            var v = (df + i).load[width=W]()
+            var r = _idf_bm25plus[W](v, nd)
+            (out + i).store(r)
+            i += W
+        while i < n:
             var v = SIMD[DType.float32, 1](df[i])
             out[i] = _idf_bm25plus[1](v, nd)[0]
+            i += 1
     else:
         raise Error(String("unknown IDF method: ", m))
 
@@ -266,6 +342,58 @@ def csc_score(
     return PythonObject(None)
 
 
+def retrieve_batch(
+    matrix_args: PythonObject,
+    queries_args: PythonObject,
+    out_args: PythonObject,
+) raises -> PythonObject:
+    """Batched retrieve entry point: one Mojo crossing per batch.
+
+    Three tuple-packed argument groups (to fit the 6-arg `def_function`
+    cap and to keep related pointers together):
+
+    - ``matrix_args = (data_ptr, indptr_ptr, indices_ptr, n_docs)``
+    - ``queries_args = (queries_concat_ptr, queries_offsets_ptr, batch_size)``
+    - ``out_args = (scores_out_ptr, ids_out_ptr, k)``
+
+    All pointers are integer addresses (`arr.__array_interface__["data"][0]`).
+    The Python shim in `__init__.py` does all the marshaling.
+    """
+    var data = UnsafePointer[Float32, MutExternalOrigin](
+        unsafe_from_address=Int(py=matrix_args[0])
+    )
+    var indptr = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=matrix_args[1])
+    )
+    var indices = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=matrix_args[2])
+    )
+    var n_docs = Int(py=matrix_args[3])
+
+    var queries = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=queries_args[0])
+    )
+    var offsets = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=queries_args[1])
+    )
+    var batch = Int(py=queries_args[2])
+
+    var scores_out = UnsafePointer[Float32, MutExternalOrigin](
+        unsafe_from_address=Int(py=out_args[0])
+    )
+    var ids_out = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=out_args[1])
+    )
+    var k = Int(py=out_args[2])
+
+    retrieve_batch_into(
+        data, indptr, indices, n_docs,
+        queries, offsets, batch,
+        k, scores_out, ids_out,
+    )
+    return PythonObject(None)
+
+
 @export
 def PyInit_kernel() -> PythonObject:
     try:
@@ -276,6 +404,7 @@ def PyInit_kernel() -> PythonObject:
         m.def_function[score_idf_array]("score_idf_array")
         m.def_function[topk]("topk")
         m.def_function[csc_score]("csc_score")
+        m.def_function[retrieve_batch]("retrieve_batch")
         return m.finalize()
     except e:
         abort(String("failed to create module: ", e))

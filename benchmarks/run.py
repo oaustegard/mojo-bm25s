@@ -36,7 +36,9 @@ if str(_REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from benchmarks.datasets import load_beir
-from benchmarks.backends import build_retriever, backend_selection
+from benchmarks.backends import (
+    build_retriever, retrieve_one, retrieve_batch,
+)
 
 
 def _peak_rss_mb() -> float:
@@ -67,28 +69,30 @@ def run_one(
     retriever = build_retriever(backend, corpus_tokens)
     index_secs = time.perf_counter() - t0
 
-    backend_sel = backend_selection(backend)
-
     # Warmup — JIT compile for numba, page-warm everything for the others.
     for q in query_tokens[: max(1, warmup)]:
-        retriever.retrieve(
-            [q], k=k, backend_selection=backend_sel, show_progress=False
-        )
+        retrieve_one(backend, retriever, q, k)
 
-    # Timed loop. Each query is retrieved `repeats` times; we record
-    # individual latencies.
-    latencies_us: list[float] = []
+    # Throughput phase: one batched call over all queries, repeated.
+    # This is the apples-to-apples comparison — numba batches via
+    # `_retrieve_numba_functional`, mojo batches via `retrieve_batch`,
+    # numpy still sequential-maps internally (no batched native path).
     t0 = time.perf_counter()
+    for _ in range(repeats):
+        retrieve_batch(backend, retriever, query_tokens, k)
+    batch_total_secs = time.perf_counter() - t0
+    batch_total_queries = len(query_tokens) * repeats
+    qps = batch_total_queries / batch_total_secs
+
+    # Latency phase: per-query loop, recording individual wall times.
+    # Captures the small-batch (interactive) cost the throughput
+    # number hides.
+    latencies_us: list[float] = []
     for _ in range(repeats):
         for q in query_tokens:
             t_q = time.perf_counter()
-            retriever.retrieve(
-                [q], k=k, backend_selection=backend_sel,
-                show_progress=False,
-            )
+            retrieve_one(backend, retriever, q, k)
             latencies_us.append((time.perf_counter() - t_q) * 1_000_000)
-    total_secs = time.perf_counter() - t0
-    total_queries = len(query_tokens) * repeats
 
     return {
         "dataset": dataset,
@@ -98,7 +102,7 @@ def run_one(
         "queries": len(query_tokens),
         "repeats": repeats,
         "index_secs": round(index_secs, 4),
-        "qps": round(total_queries / total_secs, 2),
+        "qps": round(qps, 2),
         "latency_p50_ms": round(statistics.median(latencies_us) / 1000, 4),
         "latency_p95_ms": round(
             statistics.quantiles(latencies_us, n=20)[18] / 1000, 4
