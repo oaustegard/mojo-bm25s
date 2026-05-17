@@ -352,6 +352,7 @@ def retrieve_batch(
 
 
 from .patch import patch_bm25s  # noqa: E402
+from .stem import stem, stem_corpus  # noqa: E402
 
 
 __all__ = [
@@ -364,4 +365,6 @@ __all__ = [
     "csc_score_into",
     "retrieve_batch",
     "patch_bm25s",
+    "stem",
+    "stem_corpus",
 ]
