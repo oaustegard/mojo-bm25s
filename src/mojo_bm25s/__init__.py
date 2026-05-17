@@ -248,6 +248,7 @@ def retrieve_batch(
     retriever,
     query_tokens_batch,
     k: int = 10,
+    num_workers: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Batched retrieve in a single Mojo call — Path A from PHASE2.md.
 
@@ -264,9 +265,22 @@ def retrieve_batch(
     The point of this entry point is to amortize the Python ↔ Mojo
     per-call cost: where the per-query patch crosses the boundary
     O(n_queries) times, this crosses exactly once per batch.
+
+    ``num_workers`` selects the parallel-batch dispatch policy:
+    - ``0`` (default) → auto-pick = ``os.cpu_count()``, capped at the
+      batch size. Set to ``1`` to force the historical serial path.
+    - ``1`` → serial; one scratch buffer reused across queries.
+    - ``> 1`` → parallel; one scratch per worker, batch chunked into
+      ``num_workers`` contiguous slices. Output is bitwise-identical to
+      the serial path (queries are independent).
     """
     if k <= 0:
         raise ValueError(f"k must be positive, got {k}")
+    if num_workers < 0:
+        raise ValueError(f"num_workers must be >= 0, got {num_workers}")
+    if num_workers == 0:
+        import os
+        num_workers = os.cpu_count() or 1
 
     # Sum lengths in int64 BEFORE materializing per-query arrays — the
     # whole point of the guard is to refuse a workload that would overflow
@@ -331,6 +345,7 @@ def retrieve_batch(
             int(scores_out.__array_interface__["data"][0]),
             int(ids_out.__array_interface__["data"][0]),
             int(k),
+            int(num_workers),
         ),
     )
     return scores_out, ids_out
