@@ -16,6 +16,8 @@ modular = "*"
 python = "3.12.*"
 numpy = "*"
 pytest = "*"
+numba = "*"
+pystemmer = "*"
 
 [pypi-dependencies]
 bm25s = "*"
