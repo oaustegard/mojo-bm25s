@@ -18,6 +18,51 @@ _PACKAGE_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _PACKAGE_DIR.parent.parent
 _KERNEL_PATH = _REPO_ROOT / "build" / "mojo_bm25s.so"
 
+_INT32_MAX = int(np.iinfo(np.int32).max)
+_INT32_MIN = int(np.iinfo(np.int32).min)
+
+
+def _to_int32_checked(arr: np.ndarray, name: str) -> np.ndarray:
+    """Coerce ``arr`` to int32 contiguous, but raise if any value would
+    silently truncate. The Mojo kernels read int32 pointers — a wrapped
+    indptr / indices entry sends the kernel walking arbitrary memory.
+    """
+    arr = np.ascontiguousarray(arr)
+    if arr.dtype != np.int32 and arr.size:
+        amax = int(arr.max())
+        amin = int(arr.min())
+        if amax > _INT32_MAX or amin < _INT32_MIN:
+            raise OverflowError(
+                f"{name} contains values outside int32 range "
+                f"[{_INT32_MIN}, {_INT32_MAX}] (got min={amin}, max={amax}); "
+                f"Mojo kernels are int32-only."
+            )
+    return np.ascontiguousarray(arr, dtype=np.int32)
+
+
+def _validate_query_token_ids(
+    query: np.ndarray, n_vocab: int, name: str = "query_token_ids"
+) -> None:
+    """Reject query token IDs that would index past ``indptr``.
+
+    ``indptr`` has shape ``(n_vocab + 1,)`` so the largest valid token id
+    is ``n_vocab - 1``. The Mojo kernel does no bounds checking — an OOB
+    id sends ``indptr[t + 1]`` past the buffer.
+    """
+    if query.size == 0:
+        return
+    qmax = int(query.max())
+    qmin = int(query.min())
+    if qmin < 0:
+        raise IndexError(
+            f"{name} contains negative token id {qmin}"
+        )
+    if qmax >= n_vocab:
+        raise IndexError(
+            f"{name} contains token id {qmax} but vocabulary size is "
+            f"{n_vocab} (valid range: [0, {n_vocab - 1}])"
+        )
+
 
 def _load_kernel():
     if not _KERNEL_PATH.exists():
@@ -138,9 +183,10 @@ def csc_score(
     raw buffer pointers — no Python-level per-element iteration.
     """
     data = np.ascontiguousarray(data, dtype=np.float32)
-    indptr = np.ascontiguousarray(indptr, dtype=np.int32)
-    indices = np.ascontiguousarray(indices, dtype=np.int32)
-    query = np.ascontiguousarray(query_token_ids, dtype=np.int32)
+    indptr = _to_int32_checked(indptr, "indptr")
+    indices = _to_int32_checked(indices, "indices")
+    query = _to_int32_checked(query_token_ids, "query_token_ids")
+    _validate_query_token_ids(query, n_vocab=indptr.shape[0] - 1)
     scores = np.zeros(int(n_docs), dtype=np.float32)
 
     _kernel.csc_score(
@@ -182,9 +228,10 @@ def csc_score_into(
         raise ValueError(f"scores_out must be 1-D, got shape {scores_out.shape}")
 
     data = np.ascontiguousarray(data, dtype=np.float32)
-    indptr = np.ascontiguousarray(indptr, dtype=np.int32)
-    indices = np.ascontiguousarray(indices, dtype=np.int32)
-    query = np.ascontiguousarray(query_token_ids, dtype=np.int32)
+    indptr = _to_int32_checked(indptr, "indptr")
+    indices = _to_int32_checked(indices, "indices")
+    query = _to_int32_checked(query_token_ids, "query_token_ids")
+    _validate_query_token_ids(query, n_vocab=indptr.shape[0] - 1)
 
     _kernel.csc_score(
         int(data.__array_interface__["data"][0]),
@@ -221,6 +268,20 @@ def retrieve_batch(
     if k <= 0:
         raise ValueError(f"k must be positive, got {k}")
 
+    # Sum lengths in int64 BEFORE materializing per-query arrays — the
+    # whole point of the guard is to refuse a workload that would overflow
+    # int32 without first allocating GB of int32 buffers.
+    batch_size = len(query_tokens_batch)
+    lengths64 = np.fromiter(
+        (len(q) for q in query_tokens_batch), dtype=np.int64, count=batch_size,
+    )
+    total_tokens = int(lengths64.sum())
+    if total_tokens > _INT32_MAX:
+        raise OverflowError(
+            f"total query tokens {total_tokens} exceeds int32 INT32_MAX "
+            f"({_INT32_MAX}); the kernel uses int32 offsets and would wrap."
+        )
+
     token_id_batch: list[np.ndarray] = []
     for q in query_tokens_batch:
         if len(q) == 0:
@@ -231,12 +292,8 @@ def retrieve_batch(
         else:
             token_id_batch.append(np.asarray(q, dtype=np.int32))
 
-    batch_size = len(token_id_batch)
-    lengths = np.fromiter(
-        (q.shape[0] for q in token_id_batch), dtype=np.int32, count=batch_size,
-    )
     offsets = np.zeros(batch_size + 1, dtype=np.int32)
-    np.cumsum(lengths, out=offsets[1:])
+    np.cumsum(lengths64.astype(np.int32), out=offsets[1:])
 
     if batch_size > 0:
         queries_concat = np.ascontiguousarray(
@@ -246,9 +303,14 @@ def retrieve_batch(
         queries_concat = np.zeros(0, dtype=np.int32)
 
     data = np.ascontiguousarray(retriever.scores["data"], dtype=np.float32)
-    indptr = np.ascontiguousarray(retriever.scores["indptr"], dtype=np.int32)
-    indices = np.ascontiguousarray(retriever.scores["indices"], dtype=np.int32)
+    indptr = _to_int32_checked(retriever.scores["indptr"], "indptr")
+    indices = _to_int32_checked(retriever.scores["indices"], "indices")
     n_docs = int(retriever.scores["num_docs"])
+
+    _validate_query_token_ids(
+        queries_concat, n_vocab=indptr.shape[0] - 1,
+        name="query_tokens_batch (concatenated)",
+    )
 
     scores_out = np.zeros((batch_size, k), dtype=np.float32)
     ids_out = np.zeros((batch_size, k), dtype=np.int32)
