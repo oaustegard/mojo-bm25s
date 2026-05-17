@@ -157,13 +157,29 @@ def retrieve_batch_into(
                 # (touched/was_touched were already clean coming into this
                 # branch because the previous query — sparse or dense —
                 # left them clean.)
+                #
+                # SIMD-W=8 lift (issue #19): load 8 (index, data) pairs
+                # per iteration via wide pointer-load, then iterate 8 lanes
+                # scalar to perform the scatter. Writes stay scalar because
+                # random-target scatter doesn't safely vectorize without
+                # AVX-512 conflict-detect.
+                comptime SCATTER_W = 8
                 for qt_idx in range(q_start, q_end):
                     var t = Int(queries_concat[qt_idx])
                     var col_start = Int(indptr[t])
                     var col_end = Int(indptr[t + 1])
-                    for j in range(col_start, col_end):
+                    var j = col_start
+                    while j + SCATTER_W <= col_end:
+                        var idx_vec = (indices + j).load[width=SCATTER_W]()
+                        var data_vec = (data + j).load[width=SCATTER_W]()
+                        for lane in range(SCATTER_W):
+                            var row = Int(idx_vec[lane])
+                            scratch[row] = scratch[row] + data_vec[lane]
+                        j += SCATTER_W
+                    while j < col_end:
                         var row = Int(indices[j])
                         scratch[row] = scratch[row] + data[j]
+                        j += 1
 
                 var pair = topk_heap_impl_ptr(scratch, n_docs, k)
                 var values = pair[0].copy()
@@ -237,13 +253,25 @@ def retrieve_batch_into(
                 # Dense path (parallel): scatter then full-zero reset to
                 # maintain the "scratch is zero between queries"
                 # invariant. See serial-path comment.
+                #
+                # SIMD-W=8 lift (issue #19) — same shape as serial dense path.
+                comptime SCATTER_W = 8
                 for qt_idx in range(q_start, q_end):
                     var t = Int(queries_concat[qt_idx])
                     var col_start = Int(indptr[t])
                     var col_end = Int(indptr[t + 1])
-                    for j in range(col_start, col_end):
+                    var j = col_start
+                    while j + SCATTER_W <= col_end:
+                        var idx_vec = (indices + j).load[width=SCATTER_W]()
+                        var data_vec = (data + j).load[width=SCATTER_W]()
+                        for lane in range(SCATTER_W):
+                            var row = Int(idx_vec[lane])
+                            scratch[row] = scratch[row] + data_vec[lane]
+                        j += SCATTER_W
+                    while j < col_end:
                         var row = Int(indices[j])
                         scratch[row] = scratch[row] + data[j]
+                        j += 1
 
                 var pair = topk_heap_impl_ptr(scratch, n_docs, k)
                 var values = pair[0].copy()
