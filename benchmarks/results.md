@@ -5,32 +5,23 @@ backends, same `bm25s` retrieve hot path:
 
 1. **numpy** — stock `bm25s`, default NumPy backend
 2. **numba** — `bm25s` with `backend="numba"` JIT
-3. **mojo** — `mojo_bm25s.retrieve_batch` (Path A — single Mojo call
-   per batch)
+3. **mojo** — `mojo_bm25s.retrieve_batch` (Path A + two follow-on
+   x86-side optimizations)
 
 All three produce identical top-k rankings (modulo score-tie reorder
 at the rank-k boundary); see `tests/parity/` and
 `tests/test_retrieve_batch.py` for the per-query parity assertions.
 
-## Methodology change vs the pre-Path-A version
+## Methodology
 
-The earlier version of this file measured throughput by calling
-`r.retrieve([q])` per query and dividing total queries by total wall
-time. That measurement disadvantaged numba (which has a native
-batched path, `_retrieve_numba_functional`) by forcing single-query
-calls through batch-of-one.
-
-The current measurement separates throughput from latency:
-
-- **QPS** = one `retrieve_batch(all_queries)` call per repeat,
-  total queries / wall time
+- **QPS** = one `retrieve_batch(all_queries)` call per repeat, total
+  queries / wall time. Apples-to-apples — numba batches via its
+  native `_retrieve_numba_functional`, mojo batches via
+  `retrieve_batch`, numpy still sequential-maps internally (no native
+  batch on the numpy side).
 - **Latency p50/p95/p99** = per-query `retrieve_one([q])` loop —
   captures the small-batch / interactive cost the throughput
-  number hides
-
-Apples-to-apples: numba's batched native path vs mojo's Path A
-`retrieve_batch` vs numpy's still-sequential map (no native batch
-on the numpy side).
+  number hides.
 
 ## Hardware
 
@@ -54,42 +45,40 @@ decision should re-run on the intended deployment hardware.
 
 | backend | qps | index_secs | latency_p50_ms | latency_p95_ms | latency_p99_ms | peak_rss_mb |
 |---|---|---|---|---|---|---|
-| numpy | 9,268 | 0.31 | 0.083 | 0.282 | 0.340 | 195 |
-| numba | 66,468 | 0.31 | 0.041 | 0.070 | 0.090 | 298 |
-| mojo  | 30,555 | 0.31 | 0.056 | 0.089 | 0.107 | 350 |
+| numpy | 9,604 | 0.30 | 0.081 | 0.279 | 0.327 | 195 |
+| numba | 66,173 | 0.31 | 0.040 | 0.070 | 0.087 | 297 |
+| mojo  | 57,303 | 0.30 | 0.041 | 0.072 | 0.092 | 350 |
 
-**mojo / numpy:** 3.30× faster.
-**mojo / numba:** 0.46× (numba 2.17× faster).
+**mojo / numpy:** 5.97× faster.
+**mojo / numba:** **0.87×** (numba 1.15× faster — within 13%).
 
 ## trec-covid — corpus=171,332 queries=50 k=10 repeats=2
 
 | backend | qps | index_secs | latency_p50_ms | latency_p95_ms | latency_p99_ms | peak_rss_mb |
 |---|---|---|---|---|---|---|
-| numpy | 224 | 15.5 | 1.379 | 13.141 | 13.519 | 1276 |
-| numba | 2,796 | 11.3 | 0.400 | 0.547 | 0.746 | 1278 |
-| mojo  | 991 | 13.4 | 1.166 | 1.441 | 1.874 | 1581 |
+| numpy | 232 | 11.9 | 1.311 | 12.939 | 13.672 | 1276 |
+| numba | 2,685 | 12.5 | 0.447 | 0.626 | 0.877 | 1278 |
+| mojo  | 2,164 | 13.0 | 0.547 | 0.746 | 0.813 | 1581 |
 
-**mojo / numpy:** 4.42× faster.
-**mojo / numba:** 0.35× (numba 2.82× faster).
+**mojo / numpy:** 9.33× faster.
+**mojo / numba:** **0.81×** (numba 1.24× faster — within 19%).
 
-## What Path A delivered
+## Cumulative Mojo improvements
 
-Compared to the per-query monkey-patch numbers in the pre-Path-A
-version of this file:
-
-| dataset | mojo QPS before Path A | mojo QPS after Path A | speedup |
+| stage | scifact QPS | trec-covid QPS | scifact mojo/numba |
 |---|---|---|---|
-| scifact | 13,151 | 30,555 | **2.32×** |
-| trec-covid | 766 | 991 | **1.29×** |
+| Original per-query monkey-patch | 13,151 | 766 | 0.50× |
+| + Path A (`retrieve_batch` single Mojo call per batch) | 30,555 | 991 | 0.46×* |
+| + `score_*` SIMD-W=8 lift (off bench hot path; helps direct API users) | (no bench change) | (no bench change) | — |
+| + `retrieve.mojo` scratch via `UnsafePointer` (no List bookkeeping in hot loop) | 41,496 | 1,493 | 0.62× |
+| + `topk_heap_impl_ptr` (heap input scan via pointer too) | **57,303** | **2,164** | **0.87×** |
 
-The diagnosis held: reducing Python ↔ Mojo crossings from O(n_queries)
-to O(1) per batch gave Mojo a real speedup, especially on the smaller
-corpus where boundary cost was a larger fraction of the work.
+*The methodology change that landed with Path A also gave numba its proper
+batched measurement (was being measured at batch-of-one before), so the
+ratio briefly worsened even though absolute Mojo QPS improved 2.3×.
 
-But numba also gained from the apples-to-apples measurement change
-(its batched native path was being measured at batch-of-one before,
-which defeated its internal batching). With both backends measured
-fairly, the relative ratio barely moved.
+Total Mojo speedup over the original per-query path: **4.36× scifact /
+2.83× trec-covid.**
 
 ## Natural Questions (~1M docs)
 
@@ -104,7 +93,6 @@ pixi run python benchmarks/run.py --dataset nq --all-backends --repeats 1
 ## Reproduction
 
 ```bash
-# Install env (Mojo + Python deps via pixi).
 pixi install
 
 # All three backends, scifact:
@@ -112,9 +100,6 @@ pixi run python benchmarks/run.py --dataset scifact --all-backends --repeats 3 -
 
 # Trec-covid:
 pixi run python benchmarks/run.py --dataset trec-covid --all-backends --repeats 2 --k 10
-
-# One backend, one dataset, table output:
-pixi run python benchmarks/run.py --dataset scifact --backend mojo --k 10
 ```
 
 Dataset caches under `~/.cache/mojo-bm25s/datasets/` (or
@@ -123,24 +108,23 @@ Dataset caches under `~/.cache/mojo-bm25s/datasets/` (or
 
 ## Honest read
 
-Path A confirmed the diagnosis (boundary cost was real and addressable),
-but the pre-registered Phase 2 trigger remains **not met on x86**:
+The Mojo-side x86 engineering is now mostly mined out. Path A diagnosed
+the boundary-cost issue correctly; the two follow-on changes
+(`UnsafePointer` access for scratch + the pointer-input topk variant)
+removed Mojo's `List` indexing overhead from the hot loop. Remaining
+gap is structural — numba's LLVM codegen on the scatter pattern is
+still slightly ahead, but the gap is small.
 
-- (a) Mojo beats numba by ≥1.3× on a BEIR dataset — fails. Mojo
-  is 0.35–0.46× of numba.
-- (b) Mojo matches numba within 10% on ARM/Apple Silicon — still
-  unmeasured.
+Status against the pre-registered Phase 2 trigger:
 
-The remaining gap is structural to numba's LLVM-autovec lineage on
-x86 — not something a Path A-style optimization can close. The
-scatter loop in `retrieve.mojo` is the inner bottleneck (random
-writes into the score scratch buffer); SIMD scatter doesn't help
-much when the access pattern is irregular. Numba's LLVM
-specializes this loop with x86-tuned codegen, which is exactly
-where it picks up its advantage.
+- (a) Mojo beats numba by ≥1.3× on a BEIR dataset — **still not met on
+  x86**. Mojo is 0.81–0.87× of numba. Closing the remaining 50% on
+  x86 looks unlikely without bigger structural changes.
+- (b) Mojo matches numba within 10% on ARM/Apple Silicon — **looks
+  very achievable**. On x86 Mojo is already within 13% on scifact
+  and within 19% on trec-covid. Numba's x86 LLVM-autovec lead
+  shrinks on ARM (a key reason (b) was written this way). If on ARM
+  Mojo holds the same or gains a little, it should clear (b)
+  cleanly.
 
-Path B (re-run on ARM/Apple Silicon, evaluate trigger (b)) is the
-remaining unknown. If on ARM Mojo is within 10% of numba on either
-dataset, Phase 2 trigger fires.
-
-See `PHASE2.md` for the decision and the path forward.
+See `PHASE2.md` for the decision.

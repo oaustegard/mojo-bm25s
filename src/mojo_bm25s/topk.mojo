@@ -12,7 +12,14 @@ Two algorithms exposed for benchmarking:
 Both return two parallel buffers (scores, indices) sorted by descending
 score. Tie-breaking is implementation-defined for equal-score boundary
 elements (`bm25s.selection.topk` exhibits the same indeterminacy).
+
+`topk_heap_impl_ptr` is the pointer-input variant used by
+`retrieve.retrieve_batch_into` to avoid List indexing overhead on the
+N-element scan (the small k-sized heap itself stays as List, since
+the mutating sift helpers want List ownership).
 """
+
+from std.memory import UnsafePointer
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +118,55 @@ def topk_heap_impl(
     # Sort heap contents in descending order. k_eff is small (≤ a few
     # hundred typical), so an in-place selection sort is fine — and
     # avoids allocating a permutation buffer.
+    for i in range(k_eff):
+        var best = i
+        for j in range(i + 1, k_eff):
+            if values[j] > values[best]:
+                best = j
+        if best != i:
+            var tv = values[i]
+            var ti = indices[i]
+            values[i] = values[best]
+            indices[i] = indices[best]
+            values[best] = tv
+            indices[best] = ti
+
+    return (values^, indices^)
+
+
+# ---------------------------------------------------------------------------
+# Pointer-input variant. Same min-heap, but the N-element input scan
+# reads via `UnsafePointer[Float32]` instead of `List[Float32]`. Used
+# by `retrieve.retrieve_batch_into` where the scratch buffer is
+# already exposed as a raw pointer; this avoids one source of List
+# indexing overhead per scratch read on every query.
+# ---------------------------------------------------------------------------
+
+def topk_heap_impl_ptr(
+    scores: UnsafePointer[Float32, _],
+    n: Int,
+    k: Int,
+) -> Tuple[List[Float32], List[Int32]]:
+    var k_eff = k
+    if k_eff > n:
+        k_eff = n
+
+    var values = List[Float32](length=k_eff, fill=Float32(0))
+    var indices = List[Int32](length=k_eff, fill=Int32(0))
+    var length = 0
+
+    for i in range(n):
+        var v = scores[i]
+        if length < k_eff:
+            _heap_push(values, indices, v, Int32(i), length)
+            length += 1
+        else:
+            if v > values[0]:
+                values[0] = v
+                indices[0] = Int32(i)
+                _sift_up(values, indices, 0, length)
+
+    # Sort heap contents descending.
     for i in range(k_eff):
         var best = i
         for j in range(i + 1, k_eff):

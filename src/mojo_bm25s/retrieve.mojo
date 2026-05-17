@@ -20,7 +20,7 @@ float32 tolerance, IDs in the rank-k tie class. See
 
 from std.memory import UnsafePointer
 
-from topk import topk_heap_impl
+from topk import topk_heap_impl_ptr
 
 
 def retrieve_batch_into(
@@ -37,18 +37,28 @@ def retrieve_batch_into(
 ):
     """For each query: zero scratch → CSC scatter → topk → write row.
 
-    The scratch score buffer is Mojo-owned and reused across the batch
-    (one allocation per call). `scores_out` and `ids_out` are
-    caller-owned ``(batch_size, k)`` row-major buffers.
+    The scratch score buffer is `List[Float32]`-backed (Mojo-owned, one
+    allocation per call), but the hot inner loops access it through the
+    raw `UnsafePointer` retrieved via `unsafe_ptr()`. List indexing
+    has bookkeeping (bounds checks, generic indirection) that the
+    pointer path skips — the inner CSC scatter is the bench-critical
+    loop, and that's where Mojo was losing ground to Numba's
+    LLVM-tuned codegen on x86.
+
+    `scores_out` and `ids_out` are caller-owned ``(batch_size, k)``
+    row-major buffers.
     """
-    var scratch = List[Float32](length=n_docs, fill=Float32(0))
+    var scratch_list = List[Float32](length=n_docs, fill=Float32(0))
+    var scratch = scratch_list.unsafe_ptr()
 
     for q in range(batch_size):
-        # Zero scratch for this query.
+        # Zero scratch for this query via raw pointer.
         for d in range(n_docs):
             scratch[d] = Float32(0)
 
         # CSC scatter: accumulate every column the query references.
+        # All array accesses go through UnsafePointer indexing — no
+        # List-level bookkeeping in the hot loop.
         var q_start = Int(queries_offsets[q])
         var q_end = Int(queries_offsets[q + 1])
         for qt_idx in range(q_start, q_end):
@@ -59,8 +69,9 @@ def retrieve_batch_into(
                 var row = Int(indices[j])
                 scratch[row] = scratch[row] + data[j]
 
-        # topk on the populated scratch buffer.
-        var pair = topk_heap_impl(scratch, k)
+        # topk reads scratch via the same UnsafePointer — its N-element
+        # scan avoids List indexing overhead too.
+        var pair = topk_heap_impl_ptr(scratch, n_docs, k)
         var values = pair[0].copy()
         var idxs = pair[1].copy()
         var k_actual = len(values)
