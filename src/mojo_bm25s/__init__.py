@@ -93,6 +93,31 @@ def topk(
     return _kernel.topk(algorithm, arr, k)
 
 
+def score_idf_array(
+    method: str,
+    df_array: np.ndarray,
+    n_docs: float,
+    allow_negative: bool = False,
+) -> np.ndarray:
+    """Vectorized IDF: apply the named scorer to every entry of ``df_array``.
+
+    For computing the vocab-wide IDF lookup table at index time. Input
+    is coerced to contiguous float32; output is a fresh float32 array
+    of the same shape.
+    """
+    df = np.ascontiguousarray(df_array, dtype=np.float32)
+    out = np.zeros(df.shape[0], dtype=np.float32)
+    _kernel.score_idf_array(
+        method,
+        int(df.__array_interface__["data"][0]),
+        int(out.__array_interface__["data"][0]),
+        int(df.shape[0]),
+        float(n_docs),
+        bool(allow_negative),
+    )
+    return out
+
+
 def csc_score(
     data: np.ndarray,
     indptr: np.ndarray,
@@ -129,4 +154,55 @@ def csc_score(
     return scores
 
 
-__all__ = ["hello", "score_tfc", "score_idf", "topk", "csc_score"]
+def csc_score_into(
+    data: np.ndarray,
+    indptr: np.ndarray,
+    indices: np.ndarray,
+    query_token_ids: np.ndarray,
+    scores_out: np.ndarray,
+) -> None:
+    """Zero-allocation CSC retrieve: accumulate into the caller's buffer.
+
+    ``scores_out`` is **mutated in place** — must be float32 contiguous
+    of length ``n_docs``. The kernel *adds* into the buffer (does not
+    zero it first), so the caller chooses whether to preload priors
+    before invoking. Returns ``None``.
+
+    Strict on ``scores_out``'s dtype/layout because silent coercion
+    would defeat the zero-copy contract; inputs (``data``, ``indptr``,
+    ``indices``, ``query_token_ids``) are coerced like in ``csc_score``.
+    """
+    if scores_out.dtype != np.float32:
+        raise TypeError(
+            f"scores_out must be float32, got {scores_out.dtype}"
+        )
+    if not scores_out.flags["C_CONTIGUOUS"]:
+        raise ValueError("scores_out must be C-contiguous")
+    if scores_out.ndim != 1:
+        raise ValueError(f"scores_out must be 1-D, got shape {scores_out.shape}")
+
+    data = np.ascontiguousarray(data, dtype=np.float32)
+    indptr = np.ascontiguousarray(indptr, dtype=np.int32)
+    indices = np.ascontiguousarray(indices, dtype=np.int32)
+    query = np.ascontiguousarray(query_token_ids, dtype=np.int32)
+
+    _kernel.csc_score(
+        int(data.__array_interface__["data"][0]),
+        int(indptr.__array_interface__["data"][0]),
+        int(indices.__array_interface__["data"][0]),
+        int(query.__array_interface__["data"][0]),
+        int(query.shape[0]),
+        (int(scores_out.__array_interface__["data"][0]), int(scores_out.shape[0])),
+    )
+    return None
+
+
+__all__ = [
+    "hello",
+    "score_tfc",
+    "score_idf",
+    "score_idf_array",
+    "topk",
+    "csc_score",
+    "csc_score_into",
+]
