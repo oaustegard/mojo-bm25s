@@ -385,11 +385,12 @@ def retrieve_batch(
         unsafe_from_address=Int(py=out_args[1])
     )
     var k = Int(py=out_args[2])
+    var num_workers = Int(py=out_args[3])
 
     retrieve_batch_into(
         data, indptr, indices, n_docs,
         queries, offsets, batch,
-        k, scores_out, ids_out,
+        k, scores_out, ids_out, num_workers,
     )
     return PythonObject(None)
 
