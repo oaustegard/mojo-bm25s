@@ -378,6 +378,7 @@ from .tokenize import tokenize, ENGLISH_STOPWORDS  # noqa: E402
 from .vocab import Vocab  # noqa: E402
 from .index_builder import build_index  # noqa: E402
 from .io import save_index, load_index  # noqa: E402
+from .retriever import Retriever  # noqa: E402
 
 
 __all__ = [
@@ -398,4 +399,5 @@ __all__ = [
     "build_index",
     "save_index",
     "load_index",
+    "Retriever",
 ]
