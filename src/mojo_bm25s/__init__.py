@@ -354,6 +354,7 @@ def retrieve_batch(
 from .patch import patch_bm25s  # noqa: E402
 from .stem import stem, stem_corpus  # noqa: E402
 from .tokenize import tokenize, ENGLISH_STOPWORDS  # noqa: E402
+from .vocab import Vocab  # noqa: E402
 
 
 __all__ = [
@@ -370,4 +371,5 @@ __all__ = [
     "stem_corpus",
     "tokenize",
     "ENGLISH_STOPWORDS",
+    "Vocab",
 ]
