@@ -4,13 +4,16 @@ Exposes Python-callable functions wired into a `PythonModuleBuilder`.
 The .so is loaded by `mojo_bm25s/__init__.py` and re-exported as
 `mojo_bm25s.<name>`.
 
-Numerical kernels live in `scoring.mojo`; this file only orchestrates
-numpy ↔ Mojo marshaling and runtime dispatch on method-name strings.
+Numerical kernels live in `scoring.mojo`, `csc.mojo`, and `topk.mojo`;
+this file only orchestrates numpy ↔ Mojo marshaling and runtime dispatch
+on method-name strings. Every Python-facing function takes only buffer
+addresses (read out via `arr.__array_interface__["data"][0]` on the
+Python side) — the inner loops do no Python interop.
 
-The Python-facing `score_tfc` takes a 5-tuple of scalar params rather
-than five separate args because `PythonModuleBuilder.def_function`
-caps at 6 positional args; the `__init__.py` shim re-flattens them so
-callers see a normal kwargless signature.
+The 6-arg cap on `PythonModuleBuilder.def_function` forces the BM25
+scalar params to ride in a 5-tuple (`score_tfc`) and forces the CSC
+output pointer + length to ride together (`csc_score`); the `__init__.py`
+shim re-flattens both so callers see normal signatures.
 """
 
 from std.python import PythonObject, Python
@@ -18,7 +21,11 @@ from std.python.bindings import PythonModuleBuilder
 from std.os import abort
 from std.memory import UnsafePointer
 
-from scoring import tfc_scalar, idf_scalar
+from scoring import (
+    _tfc_robertson, _tfc_lucene, _tfc_atire, _tfc_bm25l, _tfc_bm25plus,
+    _idf_robertson, _idf_lucene, _idf_atire, _idf_bm25l, _idf_bm25plus,
+    tfc_scalar, idf_scalar,
+)
 from topk import topk_heap_impl, topk_quickselect_impl
 from csc import csc_score_into
 
@@ -27,6 +34,13 @@ def hello() raises -> PythonObject:
     var v = SIMD[DType.float32, 4](1.0, 2.0, 3.0, 4.0)
     return PythonObject(Float64(v.reduce_add()))
 
+
+# ---------------------------------------------------------------------------
+# score_tfc — vectorized over `tf_array` via raw pointers.
+# Dispatch on the method string happens ONCE outside the hot loop, so
+# the per-element body is a pointer load + SIMD-generic kernel call +
+# pointer store.
+# ---------------------------------------------------------------------------
 
 def score_tfc(
     method: PythonObject, tf_array: PythonObject, params: PythonObject
@@ -46,10 +60,37 @@ def score_tfc(
     var np = Python.import_module("numpy")
     var n = Int(py=tf_array.shape[0])
     var result = np.zeros(n, dtype="float32")
-    for i in range(n):
-        var tf = Float32(Float64(py=tf_array[i]))
-        var val = tfc_scalar(m, tf, l_d, l_avg, k1, b, delta)
-        result[i] = PythonObject(Float64(val))
+
+    var tf_ptr = UnsafePointer[Float32, MutExternalOrigin](
+        unsafe_from_address=Int(py=tf_array.__array_interface__["data"][0])
+    )
+    var out_ptr = UnsafePointer[Float32, MutExternalOrigin](
+        unsafe_from_address=Int(py=result.__array_interface__["data"][0])
+    )
+
+    if m == "robertson":
+        for i in range(n):
+            var v = SIMD[DType.float32, 1](tf_ptr[i])
+            out_ptr[i] = _tfc_robertson[1](v, l_d, l_avg, k1, b, delta)[0]
+    elif m == "lucene":
+        for i in range(n):
+            var v = SIMD[DType.float32, 1](tf_ptr[i])
+            out_ptr[i] = _tfc_lucene[1](v, l_d, l_avg, k1, b, delta)[0]
+    elif m == "atire":
+        for i in range(n):
+            var v = SIMD[DType.float32, 1](tf_ptr[i])
+            out_ptr[i] = _tfc_atire[1](v, l_d, l_avg, k1, b, delta)[0]
+    elif m == "bm25l":
+        for i in range(n):
+            var v = SIMD[DType.float32, 1](tf_ptr[i])
+            out_ptr[i] = _tfc_bm25l[1](v, l_d, l_avg, k1, b, delta)[0]
+    elif m == "bm25+":
+        for i in range(n):
+            var v = SIMD[DType.float32, 1](tf_ptr[i])
+            out_ptr[i] = _tfc_bm25plus[1](v, l_d, l_avg, k1, b, delta)[0]
+    else:
+        raise Error(String("unknown TFC method: ", m))
+
     return result
 
 
@@ -66,6 +107,70 @@ def score_idf(
     return PythonObject(Float64(val))
 
 
+# ---------------------------------------------------------------------------
+# score_idf_array — vectorized IDF over a vocab-wide df array. Inputs
+# are arbitrary numeric numpy arrays on the Python side (the shim
+# coerces to float32 contiguous), so the kernel sees one raw pointer.
+# ---------------------------------------------------------------------------
+
+def score_idf_array(
+    method: PythonObject,
+    df_ptr: PythonObject,
+    out_ptr: PythonObject,
+    n_elem: PythonObject,
+    n_docs: PythonObject,
+    allow_negative: PythonObject,
+) raises -> PythonObject:
+    """Compute IDF for an array of doc-frequencies into ``out_ptr``.
+
+    ``df_ptr`` / ``out_ptr`` are integer buffer addresses (caller owns
+    both allocations and dtype invariants). Dispatch on ``method``
+    happens once; the per-element body is pure Mojo.
+    """
+    var m = String(py=method)
+    var n = Int(py=n_elem)
+    var nd = Float32(Float64(py=n_docs))
+    var allow_neg = Bool(py=allow_negative)
+
+    var df = UnsafePointer[Float32, MutExternalOrigin](
+        unsafe_from_address=Int(py=df_ptr)
+    )
+    var out = UnsafePointer[Float32, MutExternalOrigin](
+        unsafe_from_address=Int(py=out_ptr)
+    )
+
+    if m == "robertson":
+        for i in range(n):
+            var v = SIMD[DType.float32, 1](df[i])
+            out[i] = _idf_robertson[1](v, nd, allow_neg)[0]
+    elif m == "lucene":
+        for i in range(n):
+            var v = SIMD[DType.float32, 1](df[i])
+            out[i] = _idf_lucene[1](v, nd)[0]
+    elif m == "atire":
+        for i in range(n):
+            var v = SIMD[DType.float32, 1](df[i])
+            out[i] = _idf_atire[1](v, nd)[0]
+    elif m == "bm25l":
+        for i in range(n):
+            var v = SIMD[DType.float32, 1](df[i])
+            out[i] = _idf_bm25l[1](v, nd)[0]
+    elif m == "bm25+":
+        for i in range(n):
+            var v = SIMD[DType.float32, 1](df[i])
+            out[i] = _idf_bm25plus[1](v, nd)[0]
+    else:
+        raise Error(String("unknown IDF method: ", m))
+
+    return PythonObject(None)
+
+
+# ---------------------------------------------------------------------------
+# topk — pointer-based input copy into the Mojo-owned working buffer
+# (the heap/quickselect kernels need List ownership for mutation), then
+# pointer-based write into caller-allocated output numpy arrays.
+# ---------------------------------------------------------------------------
+
 def topk(
     algorithm: PythonObject, scores_array: PythonObject, k: PythonObject
 ) raises -> PythonObject:
@@ -79,10 +184,12 @@ def topk(
     var n = Int(py=scores_array.shape[0])
     var k_int = Int(py=k)
 
-    # Marshal numpy → Mojo List once, then run the algorithm in pure Mojo.
+    var src = UnsafePointer[Float32, MutExternalOrigin](
+        unsafe_from_address=Int(py=scores_array.__array_interface__["data"][0])
+    )
     var scores = List[Float32](length=n, fill=Float32(0))
     for i in range(n):
-        scores[i] = Float32(Float64(py=scores_array[i]))
+        scores[i] = src[i]
 
     var result_values: List[Float32]
     var result_indices: List[Int32]
@@ -101,9 +208,16 @@ def topk(
     var np = Python.import_module("numpy")
     var scores_out = np.zeros(k_out, dtype="float32")
     var indices_out = np.zeros(k_out, dtype="int32")
+
+    var out_v = UnsafePointer[Float32, MutExternalOrigin](
+        unsafe_from_address=Int(py=scores_out.__array_interface__["data"][0])
+    )
+    var out_i = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=indices_out.__array_interface__["data"][0])
+    )
     for i in range(k_out):
-        scores_out[i] = PythonObject(Float64(result_values[i]))
-        indices_out[i] = PythonObject(Int(result_indices[i]))
+        out_v[i] = result_values[i]
+        out_i[i] = result_indices[i]
 
     var builtins = Python.import_module("builtins")
     var lst = builtins.list()
@@ -159,6 +273,7 @@ def PyInit_kernel() -> PythonObject:
         m.def_function[hello]("hello")
         m.def_function[score_tfc]("score_tfc")
         m.def_function[score_idf]("score_idf")
+        m.def_function[score_idf_array]("score_idf_array")
         m.def_function[topk]("topk")
         m.def_function[csc_score]("csc_score")
         return m.finalize()
