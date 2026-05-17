@@ -249,6 +249,9 @@ def retrieve_batch(
     query_tokens_batch,
     k: int = 10,
     num_workers: int = 0,
+    *,
+    force_hashmap: bool = False,
+    force_dense: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Batched retrieve in a single Mojo call — Path A from PHASE2.md.
 
@@ -273,6 +276,12 @@ def retrieve_batch(
     - ``> 1`` → parallel; one scratch per worker, batch chunked into
       ``num_workers`` contiguous slices. Output is bitwise-identical to
       the serial path (queries are independent).
+
+    ``force_hashmap`` / ``force_dense`` (debug-only, mutually exclusive):
+    pin the per-query path selector for parity testing. By default the
+    kernel auto-picks per query based on ``Σ col_len`` vs ``n_docs / 8``
+    (#21 dense/sparse-reset boundary) vs a tighter ``n_docs / 32`` for
+    the hashmap path (issue #34). These kwargs override that heuristic.
     """
     if k <= 0:
         raise ValueError(f"k must be positive, got {k}")
@@ -281,6 +290,17 @@ def retrieve_batch(
     if num_workers == 0:
         import os
         num_workers = os.cpu_count() or 1
+    if force_hashmap and force_dense:
+        raise ValueError(
+            "force_hashmap and force_dense are mutually exclusive"
+        )
+    # path_mode: 0=auto, 1=force_dense, 2=force_hashmap.
+    if force_dense:
+        path_mode = 1
+    elif force_hashmap:
+        path_mode = 2
+    else:
+        path_mode = 0
 
     # Sum lengths in int64 BEFORE materializing per-query arrays — the
     # whole point of the guard is to refuse a workload that would overflow
@@ -346,6 +366,7 @@ def retrieve_batch(
             int(ids_out.__array_interface__["data"][0]),
             int(k),
             int(num_workers),
+            int(path_mode),
         ),
     )
     return scores_out, ids_out

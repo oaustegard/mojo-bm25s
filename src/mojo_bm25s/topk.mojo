@@ -184,6 +184,79 @@ def topk_heap_impl_ptr(
 
 
 # ---------------------------------------------------------------------------
+# Pairs variant for the hash-map scratch (issue #34).
+#
+# Walks a list of populated slot indices into parallel `keys` (doc-ids,
+# Int32) and `vals` (Float32) arrays — i.e. only the populated entries
+# of an open-addressed hash table, not the whole slot array. This is
+# the payoff of the hash-map data structure: the topk scan is O(touched
+# × log k) instead of O(n_docs × log k).
+#
+# The heap kernel itself is the same min-heap of size k as
+# `topk_heap_impl_ptr`; only the input-side scan changes.
+# ---------------------------------------------------------------------------
+
+
+def topk_heap_pairs_ptr(
+    keys: UnsafePointer[Int32, _],
+    vals: UnsafePointer[Float32, _],
+    touched: UnsafePointer[Int32, _],
+    n_touched: Int,
+    k: Int,
+) -> Tuple[List[Float32], List[Int32]]:
+    """Top-k from a hash-map's populated slots.
+
+    ``touched[i]`` for ``i in 0..n_touched`` is the slot index of the
+    i-th populated entry. ``keys[slot]`` is the doc-id stored at that
+    slot; ``vals[slot]`` is its accumulated score. Returns parallel
+    (scores, doc_ids) lists of length ``min(k, n_touched)``, sorted
+    by descending score.
+
+    A min-heap of size ``k`` filters the populated stream. After the
+    scan the heap contents are sorted descending (selection-sort over
+    the k-sized window — k is small in practice).
+    """
+    var k_eff = k
+    if k_eff > n_touched:
+        k_eff = n_touched
+    if k_eff <= 0:
+        return (List[Float32](), List[Int32]())
+
+    var values = List[Float32](length=k_eff, fill=Float32(0))
+    var indices = List[Int32](length=k_eff, fill=Int32(0))
+    var length = 0
+
+    for i in range(n_touched):
+        var slot = Int(touched[i])
+        var v = vals[slot]
+        var doc_id = keys[slot]
+        if length < k_eff:
+            _heap_push(values, indices, v, doc_id, length)
+            length += 1
+        else:
+            if v > values[0]:
+                values[0] = v
+                indices[0] = doc_id
+                _sift_up(values, indices, 0, length)
+
+    # Descending selection-sort over the heap window.
+    for i in range(k_eff):
+        var best = i
+        for j in range(i + 1, k_eff):
+            if values[j] > values[best]:
+                best = j
+        if best != i:
+            var tv = values[i]
+            var ti = indices[i]
+            values[i] = values[best]
+            indices[i] = indices[best]
+            values[best] = tv
+            indices[best] = ti
+
+    return (values^, indices^)
+
+
+# ---------------------------------------------------------------------------
 # Algorithm 2: quickselect on a copy of the score buffer paired with
 # original-index tracking. After partitioning so that the top-k elements
 # occupy positions [0, k), sort that prefix descending. O(N) average,
