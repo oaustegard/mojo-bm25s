@@ -16,9 +16,11 @@ callers see a normal kwargless signature.
 from std.python import PythonObject, Python
 from std.python.bindings import PythonModuleBuilder
 from std.os import abort
+from std.memory import UnsafePointer
 
 from scoring import tfc_scalar, idf_scalar
 from topk import topk_heap_impl, topk_quickselect_impl
+from csc import csc_score_into
 
 
 def hello() raises -> PythonObject:
@@ -110,6 +112,46 @@ def topk(
     return builtins.tuple(lst)
 
 
+def csc_score(
+    data_ptr: PythonObject,
+    indptr_ptr: PythonObject,
+    indices_ptr: PythonObject,
+    query_ptr: PythonObject,
+    n_query: PythonObject,
+    scores_ptr_and_n_docs: PythonObject,
+) raises -> PythonObject:
+    """Mojo-level CSC retrieve kernel; pointer-based for hot-path speed.
+
+    All array arguments come in as the integer address of the underlying
+    buffer (Python: ``arr.__array_interface__["data"][0]``). The Python
+    shim in ``__init__.py`` packs the addresses and dispatches; the kernel
+    itself does zero Python interop on the inner loop.
+
+    ``scores_ptr_and_n_docs`` is a 2-tuple ``(scores_out_ptr, n_docs)``
+    because ``def_function`` caps positional args at 6.
+    """
+    var data = UnsafePointer[Float32, MutExternalOrigin](
+        unsafe_from_address=Int(py=data_ptr)
+    )
+    var indptr = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=indptr_ptr)
+    )
+    var indices = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=indices_ptr)
+    )
+    var query = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=query_ptr)
+    )
+    var nq = Int(py=n_query)
+    var scores = UnsafePointer[Float32, MutExternalOrigin](
+        unsafe_from_address=Int(py=scores_ptr_and_n_docs[0])
+    )
+    var nd = Int(py=scores_ptr_and_n_docs[1])
+
+    csc_score_into(data, indptr, indices, query, nq, scores, nd)
+    return PythonObject(None)
+
+
 @export
 def PyInit_kernel() -> PythonObject:
     try:
@@ -118,6 +160,7 @@ def PyInit_kernel() -> PythonObject:
         m.def_function[score_tfc]("score_tfc")
         m.def_function[score_idf]("score_idf")
         m.def_function[topk]("topk")
+        m.def_function[csc_score]("csc_score")
         return m.finalize()
     except e:
         abort(String("failed to create module: ", e))
