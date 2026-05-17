@@ -18,6 +18,7 @@ from std.python.bindings import PythonModuleBuilder
 from std.os import abort
 
 from scoring import tfc_scalar, idf_scalar
+from topk import topk_heap_impl, topk_quickselect_impl
 
 
 def hello() raises -> PythonObject:
@@ -63,6 +64,52 @@ def score_idf(
     return PythonObject(Float64(val))
 
 
+def topk(
+    algorithm: PythonObject, scores_array: PythonObject, k: PythonObject
+) raises -> PythonObject:
+    """Select the top-k highest scores from a 1-D float32 array.
+
+    Returns a Python 2-tuple ``(scores: float32[k], indices: int32[k])``
+    sorted by descending score. ``algorithm`` is ``"heap"`` or
+    ``"quickselect"``.
+    """
+    var algo = String(py=algorithm)
+    var n = Int(py=scores_array.shape[0])
+    var k_int = Int(py=k)
+
+    # Marshal numpy → Mojo List once, then run the algorithm in pure Mojo.
+    var scores = List[Float32](length=n, fill=Float32(0))
+    for i in range(n):
+        scores[i] = Float32(Float64(py=scores_array[i]))
+
+    var result_values: List[Float32]
+    var result_indices: List[Int32]
+    if algo == "heap":
+        var pair = topk_heap_impl(scores, k_int)
+        result_values = pair[0].copy()
+        result_indices = pair[1].copy()
+    elif algo == "quickselect":
+        var pair = topk_quickselect_impl(scores, k_int)
+        result_values = pair[0].copy()
+        result_indices = pair[1].copy()
+    else:
+        raise Error(String("unknown topk algorithm: ", algo))
+
+    var k_out = len(result_values)
+    var np = Python.import_module("numpy")
+    var scores_out = np.zeros(k_out, dtype="float32")
+    var indices_out = np.zeros(k_out, dtype="int32")
+    for i in range(k_out):
+        scores_out[i] = PythonObject(Float64(result_values[i]))
+        indices_out[i] = PythonObject(Int(result_indices[i]))
+
+    var builtins = Python.import_module("builtins")
+    var lst = builtins.list()
+    lst.append(scores_out)
+    lst.append(indices_out)
+    return builtins.tuple(lst)
+
+
 @export
 def PyInit_kernel() -> PythonObject:
     try:
@@ -70,6 +117,7 @@ def PyInit_kernel() -> PythonObject:
         m.def_function[hello]("hello")
         m.def_function[score_tfc]("score_tfc")
         m.def_function[score_idf]("score_idf")
+        m.def_function[topk]("topk")
         return m.finalize()
     except e:
         abort(String("failed to create module: ", e))
