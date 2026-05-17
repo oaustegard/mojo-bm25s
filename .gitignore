@@ -1,0 +1,23 @@
+# Mojo
+*.mojopkg
+.magic/
+.pixi/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Benchmark scratch
+datasets/
+benchmarks/cache/
