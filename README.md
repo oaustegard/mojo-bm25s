@@ -1,5 +1,7 @@
 # mojo-bm25s
 
+[![CI](https://github.com/oaustegard/mojo-bm25s/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/oaustegard/mojo-bm25s/actions/workflows/ci.yml)
+
 Mojo-native BM25 sparse retrieval. Inspired by [`xhluca/bm25s`](https://github.com/xhluca/bm25s) and by the PostgreSQL extension [`Intelligent-Internet/psql_bm25s`](https://github.com/Intelligent-Internet/psql_bm25s) — borrowing the eager-sparse-scoring idea, not the implementation. **No source code from `bm25s` or `psql_bm25s` is vendored or ported.**
 
 ## Status: Phase 1 (kernel-only proof)
