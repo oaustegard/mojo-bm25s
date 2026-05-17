@@ -16,5 +16,8 @@ dependencies = [
 [project.optional-dependencies]
 test = ["pytest>=7", "bm25s>=0.2", "rank-bm25>=0.2"]
 
+[project.scripts]
+mojo-bm25s = "mojo_bm25s.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
