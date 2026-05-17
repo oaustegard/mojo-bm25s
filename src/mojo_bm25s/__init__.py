@@ -197,6 +197,9 @@ def csc_score_into(
     return None
 
 
+from .patch import patch_bm25s  # noqa: E402
+
+
 __all__ = [
     "hello",
     "score_tfc",
@@ -205,4 +208,5 @@ __all__ = [
     "topk",
     "csc_score",
     "csc_score_into",
+    "patch_bm25s",
 ]
