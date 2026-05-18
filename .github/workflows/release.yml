@@ -1,0 +1,89 @@
+name: Release
+
+# Triggered by pushing a `v*` tag (e.g. `v0.1.0-rc1`). Builds the
+# linux-64 wheel from the tagged commit and publishes to PyPI using
+# trusted-publisher (OIDC) auth — no API token in repo secrets.
+#
+# Trusted publisher must be configured on PyPI first:
+#   https://pypi.org/manage/account/publishing/
+#   project: mojo_bm25s, owner: oaustegard, repo: mojo-bm25s,
+#   workflow: release.yml, environment: pypi
+#
+# For test runs, push to a `v*-rc*` tag and inspect the dist/ artifact
+# from the build job before publishing. The `publish` job will still
+# run on rc tags; to skip publish during testing, comment out the
+# `needs: build` job dependency or push to a non-`v*` tag.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build wheel (linux-64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same pixi-based Mojo install as CI. The wheel build needs
+      # `mojo build` to produce build/mojo_bm25s.so before
+      # scripts/build_wheel.py copies it into the package.
+      - name: Install pixi
+        uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          pixi-version: latest
+          cache: false
+
+      - name: Build Mojo kernel
+        run: pixi run build
+
+      - name: Install Python build deps
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install build
+
+      - name: Build wheel
+        # --skip-mojo: we already ran `pixi run build` above, so reuse
+        # build/mojo_bm25s.so. The helper still does the .so → package
+        # copy and `python -m build` invocation.
+        run: python3 scripts/build_wheel.py --skip-mojo --out dist
+
+      - name: Show wheel contents
+        run: |
+          ls -la dist/
+          python3 -m zipfile -l dist/*.whl
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-linux-64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # Trusted-publisher requires this environment to exist on the repo
+    # AND to be listed on PyPI's publisher config. Create it under
+    # Settings -> Environments before the first tag push.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/mojo_bm25s
+    permissions:
+      id-token: write  # required for OIDC trusted-publisher exchange
+    steps:
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wheel-linux-64
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # No `password:` field — OIDC trusted publisher handles auth.
