@@ -21,3 +21,12 @@ mojo-bm25s = "mojo_bm25s.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# The compiled Mojo kernel (built by `scripts/build_wheel.py`) gets
+# staged at src/mojo_bm25s/_kernel.so before `python -m build` runs;
+# package-data picks it up and packs it next to __init__.py in the wheel.
+# Without this, setuptools' default `find_packages` ignores arbitrary
+# non-Python files and the wheel installs cleanly but `_load_kernel()`
+# raises ImportError on first import.
+[tool.setuptools.package-data]
+mojo_bm25s = ["_kernel.so"]

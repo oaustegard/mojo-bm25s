@@ -29,3 +29,6 @@ pystemmer = "*"
 [pypi-dependencies]
 bm25s = "*"
 rank-bm25 = "*"
+# Used by tests/test_wheel_distribution.py to build and inspect the
+# wheel produced by scripts/build_wheel.py.
+build = "*"

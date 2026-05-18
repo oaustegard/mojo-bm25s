@@ -1,9 +1,19 @@
-"""Python shim that loads the Mojo-built kernel from ``build/mojo_bm25s.so``.
+"""Python shim that loads the Mojo-built kernel.
 
 Re-exports the BM25 scoring kernels with the signatures the test suite
 and downstream callers see. The underlying Mojo functions take only
 positional ``PythonObject`` args; default-argument handling lives here
 on the Python side.
+
+Kernel-loading search order (see ``_KERNEL_SEARCH_PATHS``):
+
+1. ``<package_dir>/_kernel.so`` — bundled by ``pip install``ed wheels
+   (staged by ``scripts/build_wheel.py`` before ``python -m build``).
+2. ``<repo_root>/build/mojo_bm25s.so`` — produced by ``pixi run build``
+   in the in-tree dev workflow.
+
+A wheel install hits path #1 immediately. A fresh `git clone` + `pixi
+run build` hits #2. Both work without environment-detection branching.
 """
 
 from __future__ import annotations
@@ -16,7 +26,16 @@ import numpy as np
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _PACKAGE_DIR.parent.parent
-_KERNEL_PATH = _REPO_ROOT / "build" / "mojo_bm25s.so"
+
+# Kernel search order: bundled-adjacent-to-package first (wheel install),
+# then the in-tree `build/` dir (pixi run build, contributor workflow).
+# Keeping both paths means the same `__init__.py` works whether the user
+# `pip install`'d a wheel or is running from a freshly-cloned dev tree —
+# no environment-detection branching, just a list of locations to check.
+_KERNEL_SEARCH_PATHS = (
+    _PACKAGE_DIR / "_kernel.so",
+    _REPO_ROOT / "build" / "mojo_bm25s.so",
+)
 
 _INT32_MAX = int(np.iinfo(np.int32).max)
 _INT32_MIN = int(np.iinfo(np.int32).min)
@@ -64,17 +83,30 @@ def _validate_query_token_ids(
         )
 
 
+def _resolve_kernel_path() -> Path:
+    """Return the first existing kernel .so from the search-path list.
+
+    Raises ImportError with the full search list if none exist — most
+    common cause is a fresh clone without a build (`pixi run build`).
+    """
+    for candidate in _KERNEL_SEARCH_PATHS:
+        if candidate.exists():
+            return candidate
+    raise ImportError(
+        "mojo_bm25s kernel not found. Searched:\n  "
+        + "\n  ".join(str(p) for p in _KERNEL_SEARCH_PATHS)
+        + "\nRun `pixi run build` for in-tree dev, or `pip install` "
+        "the wheel."
+    )
+
+
 def _load_kernel():
-    if not _KERNEL_PATH.exists():
-        raise ImportError(
-            f"mojo_bm25s kernel not found at {_KERNEL_PATH}. "
-            "Run `pixi run build` first."
-        )
+    kernel_path = _resolve_kernel_path()
     spec = importlib.util.spec_from_file_location(
-        "mojo_bm25s.kernel", str(_KERNEL_PATH)
+        "mojo_bm25s.kernel", str(kernel_path)
     )
     if spec is None or spec.loader is None:
-        raise ImportError(f"could not create import spec for {_KERNEL_PATH}")
+        raise ImportError(f"could not create import spec for {kernel_path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules["mojo_bm25s.kernel"] = module
     spec.loader.exec_module(module)

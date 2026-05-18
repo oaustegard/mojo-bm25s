@@ -3,6 +3,10 @@
 .magic/
 .pixi/
 
+# Compiled kernel staged into the package by scripts/build_wheel.py
+# before `python -m build` runs. Never committed; rebuilt on demand.
+src/mojo_bm25s/_kernel.so
+
 # Python
 __pycache__/
 *.py[cod]

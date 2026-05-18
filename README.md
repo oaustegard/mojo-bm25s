@@ -25,12 +25,46 @@ mojo_bm25s.patch_bm25s(retriever)  # routes hot loops through Mojo kernels
 results, scores = retriever.retrieve(query_tokens, k=10)  # identical results, faster
 ```
 
+## Install
+
+Linux x86-64 wheels are published to PyPI:
+
+```bash
+pip install mojo_bm25s
+```
+
+The wheel bundles the compiled Mojo kernel — no Mojo toolchain
+required on the install machine. The kernel is built with
+`--target-cpu=x86-64-v3` (AVX2/FMA baseline) for portability across
+modern x86 hosts. macOS / Apple-Silicon wheels are a planned follow-up.
+
+For development from source you still need [`pixi`](https://pixi.sh)
+and the Modular conda channel — see *Build from source* below.
+
+## Build from source
+
+```bash
+pixi run build            # mojo build → build/mojo_bm25s.so
+pixi run test             # rebuilds, then runs pytest
+python scripts/build_wheel.py --out dist   # produces dist/mojo_bm25s-*.whl
+```
+
+`scripts/build_wheel.py` orchestrates `mojo build` → copy
+`build/mojo_bm25s.so` into `src/mojo_bm25s/_kernel.so` →
+`python -m build`. The runtime loader (in
+`src/mojo_bm25s/__init__.py`) prefers the bundled `_kernel.so` when
+available and falls back to `build/mojo_bm25s.so` for in-tree dev.
+
+Tag-driven releases publish via `.github/workflows/release.yml` to
+PyPI using OIDC trusted-publisher auth.
+
 ## Layout
 
 ```
 src/mojo_bm25s/   # Mojo kernels + Python interop shim
 tests/            # parity tests vs bm25s/rank_bm25
 benchmarks/       # head-to-head vs bm25s+numpy and bm25s+numba
+scripts/          # build_wheel.py — wheel orchestrator
 ```
 
 ## See also
