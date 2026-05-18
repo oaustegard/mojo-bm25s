@@ -80,6 +80,70 @@ ratio briefly worsened even though absolute Mojo QPS improved 2.3×.
 Total Mojo speedup over the original per-query path: **4.36× scifact /
 2.83× trec-covid.**
 
+## M1 / Apple Silicon — first arm64 numbers (2026-05-18)
+
+Spot-check on an M1 MacBook (`arm64`, 8 cores, Mojo 1.0.0b1 native build —
+`mojo build src/mojo_bm25s/lib.mojo --emit shared-lib -o build/mojo_bm25s.so`,
+no `--target-cpu` flag).
+
+| backend | scifact qps | vs CCotw (x86) | vs M1 numpy |
+|---|---|---|---|
+| numpy | 8,204 | -15% (CCotw 9,604) | 1.00× |
+| mojo (serial, single-shot) | 49,806 | -13% (CCotw mojo 57,303) | **6.07×** |
+
+Mojo's relative advantage carries over: ~6× over numpy on M1, matching
+the 5.97× CCotw saw on x86. Absolute QPS is ~13–15% lower on arm64 —
+likely arm64 NEON codegen vs the x86 `--target-cpu=x86-64-v3` pin.
+
+Numba was not measured on M1 (its JIT-amortization assumption is broken
+by the single-shot harness pattern below; running the full bench harness
+would need the M1 retriever-reuse issue resolved first).
+
+### Caveats — bench harness does not run end-to-end on M1
+
+The `benchmarks/run.py` harness calls `retrieve_batch` multiple times on
+the same retriever (warmup, batch throughput, then per-query latency
+loop). On arm64, the **second call to `retrieve_batch` on the same
+retriever segfaults** (SIGSEGV / exit 139), and certain full-corpus
+single calls hang at 100% CPU. The 543-test parity suite passes on M1
+in 5m11s — every test builds a fresh retriever, so the multi-call path
+isn't exercised. Likely Mojo `1.0.0b1` arm64 codegen issue or a latent
+lifetime UB only exposed on arm64; not yet root-caused.
+
+The M1 numbers above are from **fresh Python subprocesses, single
+`retrieve_batch` call per process**, capped with `signal.alarm(25)`:
+
+```bash
+cd /Users/austegard/Projects/mojo-bm25s
+# numpy
+PYTHONPATH=src .pixi/env/bin/python -c "
+import sys, signal, time; signal.alarm(25)
+sys.path.insert(0,'src'); sys.path.insert(0,'.')
+from benchmarks.datasets import load_beir
+from benchmarks.backends import build_retriever
+ds = load_beir('scifact'); ct = ds.corpus_tokens(); qt = ds.query_tokens()
+r = build_retriever('numpy', ct)
+t = time.perf_counter()
+r.retrieve(qt, k=10, backend_selection='numpy', show_progress=False)
+el = time.perf_counter()-t
+print(f'numpy {len(qt)}q: {el*1000:.1f}ms {len(qt)/el:.0f} qps')
+"
+# mojo serial single-shot (1000q — full 1109 hits the M1 bug)
+PYTHONPATH=src .pixi/env/bin/python -c "
+import sys, signal, time; signal.alarm(25)
+sys.path.insert(0,'src'); sys.path.insert(0,'.')
+import mojo_bm25s
+from benchmarks.datasets import load_beir
+from benchmarks.backends import build_retriever
+ds = load_beir('scifact'); ct = ds.corpus_tokens(); qt = ds.query_tokens()[:1000]
+r = build_retriever('mojo', ds.corpus_tokens())
+t = time.perf_counter()
+mojo_bm25s.retrieve_batch(r, qt, k=10, num_workers=1)
+el = time.perf_counter()-t
+print(f'mojo {len(qt)}q: {el*1000:.1f}ms {len(qt)/el:.0f} qps')
+"
+```
+
 ## Natural Questions (~1M docs)
 
 Not run in this environment — dataset is large enough that running
