@@ -111,6 +111,12 @@ class LoadedIndex:
     """Result of ``load_index``. All array fields are numpy arrays with
     the documented dtypes; ``nonoccurrence`` is ``None`` unless the
     saved index used a method that requires it.
+
+    ``impact_ordered`` (issue #35) is False for the historical (default)
+    doc-id-ordered layout, True for indexes produced by
+    ``build_impact_ordered_index`` and saved via ``save_index(...,
+    impact_ordered=True)``. Existing indexes without the flag in
+    meta.json load as False — backward-compat by absence.
     """
     data: np.ndarray            # float32, shape (nnz,)
     indices: np.ndarray         # int32, shape (nnz,)
@@ -124,6 +130,7 @@ class LoadedIndex:
     b: float
     delta: float
     nonoccurrence: Optional[np.ndarray] = None  # float32 (n_vocab,) or None
+    impact_ordered: bool = False                # issue #35; default False
 
 
 # ----------------------------------------------------------------------
@@ -205,6 +212,7 @@ def save_index(
     method: str,
     idf_method: str,
     nonoccurrence: Optional[np.ndarray] = None,
+    impact_ordered: bool = False,
 ) -> None:
     """Persist a built index to ``index_dir`` atomically.
 
@@ -228,6 +236,9 @@ def save_index(
     staging.mkdir(parents=True)
 
     # --- meta.json -------------------------------------------------------
+    # ``impact_ordered`` (issue #35) only written when True so existing
+    # readers/writers that don't know about the flag continue to produce
+    # byte-identical meta.json. Loaders default missing → False.
     meta = {
         "version": _FORMAT_VERSION,
         "method": str(method),
@@ -240,6 +251,8 @@ def save_index(
         "l_avg": float(l_avg),
         "dtype": "float32",
     }
+    if impact_ordered:
+        meta["impact_ordered"] = True
     (staging / _META_FILE).write_text(
         json.dumps(meta, ensure_ascii=False, sort_keys=True),
         encoding="utf-8",
@@ -330,6 +343,8 @@ def load_index(index_dir: Union[str, Path]) -> LoadedIndex:
     k1 = float(meta["k1"])
     b = float(meta["b"])
     delta = float(meta["delta"])
+    # impact_ordered (issue #35): default False if absent (backward compat).
+    impact_ordered = bool(meta.get("impact_ordered", False))
 
     # --- vocab.bin ----------------------------------------------------
     vocab = _read_vocab_bin(index_dir / _VOCAB_FILE)
@@ -410,4 +425,5 @@ def load_index(index_dir: Union[str, Path]) -> LoadedIndex:
         b=b,
         delta=delta,
         nonoccurrence=nonoccurrence,
+        impact_ordered=impact_ordered,
     )

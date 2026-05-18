@@ -277,3 +277,64 @@ def build_index(
         indptr[tok_id + 1] = cursor
 
     return data, indices, indptr, n_docs, l_avg, nonoccurrence
+
+
+def build_impact_ordered_index(
+    corpus_token_ids: Sequence[np.ndarray],
+    n_vocab: int,
+    *,
+    method: str = "lucene",
+    idf_method: Optional[str] = None,
+    k1: float = 1.5,
+    b: float = 0.75,
+    delta: float = 0.5,
+) -> Tuple[
+    np.ndarray, np.ndarray, np.ndarray, int, float, Optional[np.ndarray]
+]:
+    """Build an impact-ordered CSC index — issue #35.
+
+    Same return tuple shape as ``build_index`` (and the same numeric
+    values), but each column's ``(data[j], indices[j])`` pairs are
+    permuted so that ``data[j]`` is monotone **descending** within the
+    column. This is the data layout the anytime-retrieval kernel
+    (``retrieve_batch_anytime``) walks for per-term running-upper-bound
+    early exit.
+
+    The permutation is column-local and idempotent (sorting an already-
+    descending column is a no-op). ``indptr`` is identical to
+    ``build_index``'s — only the ordering of entries within each column
+    changes.
+
+    For numerical reproducibility we use ``np.argsort(..., kind="stable",
+    descending pseudo-key)`` so ties on ``data`` retain doc-id ascending
+    order — that way two builds of the same corpus produce byte-identical
+    impact-ordered indexes.
+    """
+    data, indices, indptr, n_docs, l_avg, nonoccurrence = build_index(
+        corpus_token_ids, n_vocab,
+        method=method, idf_method=idf_method,
+        k1=k1, b=b, delta=delta,
+    )
+
+    if data.size == 0:
+        return data, indices, indptr, n_docs, l_avg, nonoccurrence
+
+    # Permute each column by descending data, ties broken by ascending
+    # doc-id (stable sort on negated data, with doc-id as the natural
+    # secondary key by virtue of bm25s's already-sorted-by-doc-id input).
+    data_out = np.empty_like(data)
+    indices_out = np.empty_like(indices)
+    n_vocab_int = int(n_vocab)
+    for t in range(n_vocab_int):
+        lo, hi = int(indptr[t]), int(indptr[t + 1])
+        if hi - lo < 2:
+            data_out[lo:hi] = data[lo:hi]
+            indices_out[lo:hi] = indices[lo:hi]
+            continue
+        # np.argsort doesn't take descending — sort on the negated array.
+        # Stable so ties resolve in original (doc-id ascending) order.
+        order = np.argsort(-data[lo:hi], kind="stable")
+        data_out[lo:hi] = data[lo:hi][order]
+        indices_out[lo:hi] = indices[lo:hi][order]
+
+    return data_out, indices_out, indptr, n_docs, l_avg, nonoccurrence

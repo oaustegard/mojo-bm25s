@@ -29,6 +29,7 @@ from scoring import (
 from topk import topk_heap_impl, topk_quickselect_impl
 from csc import csc_score_into
 from retrieve import retrieve_batch_into
+from retrieve_anytime import retrieve_batch_anytime_into
 
 
 def hello() raises -> PythonObject:
@@ -396,6 +397,63 @@ def retrieve_batch(
     return PythonObject(None)
 
 
+def retrieve_batch_anytime(
+    matrix_args: PythonObject,
+    queries_args: PythonObject,
+    out_args: PythonObject,
+) raises -> PythonObject:
+    """Impact-ordered anytime retrieve entry point (issue #35).
+
+    Tuple-packed args mirror ``retrieve_batch``; the ``out_args`` tuple
+    carries two extra trailing entries:
+
+    - ``counter_ptr`` — int64* (length 1) where the kernel accumulates
+      a global "entries visited" counter (used by tests to verify the
+      early-exit branch).
+    - ``want_counter`` — 0 / 1 flag; when 0 the kernel still tolerates a
+      null ``counter_ptr`` (caller may pass any int) and writes nothing.
+    """
+    var data = UnsafePointer[Float32, MutExternalOrigin](
+        unsafe_from_address=Int(py=matrix_args[0])
+    )
+    var indptr = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=matrix_args[1])
+    )
+    var indices = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=matrix_args[2])
+    )
+    var n_docs = Int(py=matrix_args[3])
+
+    var queries = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=queries_args[0])
+    )
+    var offsets = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=queries_args[1])
+    )
+    var batch = Int(py=queries_args[2])
+
+    var scores_out = UnsafePointer[Float32, MutExternalOrigin](
+        unsafe_from_address=Int(py=out_args[0])
+    )
+    var ids_out = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=out_args[1])
+    )
+    var k = Int(py=out_args[2])
+    var num_workers = Int(py=out_args[3])
+    var counter_ptr = UnsafePointer[Int64, MutExternalOrigin](
+        unsafe_from_address=Int(py=out_args[4])
+    )
+    var want_counter = Int(py=out_args[5])
+
+    retrieve_batch_anytime_into(
+        data, indptr, indices, n_docs,
+        queries, offsets, batch,
+        k, scores_out, ids_out, num_workers,
+        counter_ptr, want_counter,
+    )
+    return PythonObject(None)
+
+
 @export
 def PyInit_kernel() -> PythonObject:
     try:
@@ -407,6 +465,7 @@ def PyInit_kernel() -> PythonObject:
         m.def_function[topk]("topk")
         m.def_function[csc_score]("csc_score")
         m.def_function[retrieve_batch]("retrieve_batch")
+        m.def_function[retrieve_batch_anytime]("retrieve_batch_anytime")
         return m.finalize()
     except e:
         abort(String("failed to create module: ", e))

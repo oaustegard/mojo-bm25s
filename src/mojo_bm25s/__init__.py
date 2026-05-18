@@ -408,9 +408,10 @@ from .patch import patch_bm25s  # noqa: E402
 from .stem import stem, stem_corpus  # noqa: E402
 from .tokenize import tokenize, ENGLISH_STOPWORDS  # noqa: E402
 from .vocab import Vocab  # noqa: E402
-from .index_builder import build_index  # noqa: E402
+from .index_builder import build_index, build_impact_ordered_index  # noqa: E402
 from .io import save_index, load_index  # noqa: E402
 from .retriever import Retriever  # noqa: E402
+from .anytime import retrieve_batch_anytime  # noqa: E402
 
 
 __all__ = [
@@ -422,6 +423,7 @@ __all__ = [
     "csc_score",
     "csc_score_into",
     "retrieve_batch",
+    "retrieve_batch_anytime",
     "patch_bm25s",
     "stem",
     "stem_corpus",
@@ -429,6 +431,7 @@ __all__ = [
     "ENGLISH_STOPWORDS",
     "Vocab",
     "build_index",
+    "build_impact_ordered_index",
     "save_index",
     "load_index",
     "Retriever",
