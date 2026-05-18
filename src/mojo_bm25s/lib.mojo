@@ -29,6 +29,7 @@ from scoring import (
 from topk import topk_heap_impl, topk_quickselect_impl
 from csc import csc_score_into
 from retrieve import retrieve_batch_into
+from retrieve_bmw import retrieve_batch_bmw_into
 
 
 def hello() raises -> PythonObject:
@@ -396,6 +397,66 @@ def retrieve_batch(
     return PythonObject(None)
 
 
+def retrieve_batch_bmw(
+    matrix_args: PythonObject,
+    bmw_args: PythonObject,
+    queries_args: PythonObject,
+    out_args: PythonObject,
+) raises -> PythonObject:
+    """Batched Block-Max WAND retrieve entry point (issue #33).
+
+    Four tuple-packed argument groups (def_function caps positional args at 6):
+
+    - ``matrix_args = (data_ptr, indptr_ptr, indices_ptr, n_docs)``
+    - ``bmw_args = (block_max_impacts_ptr, block_offsets_ptr, block_size)``
+    - ``queries_args = (queries_concat_ptr, queries_offsets_ptr, batch_size)``
+    - ``out_args = (scores_out_ptr, ids_out_ptr, k, num_workers)``
+    """
+    var data = UnsafePointer[Float32, MutExternalOrigin](
+        unsafe_from_address=Int(py=matrix_args[0])
+    )
+    var indptr = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=matrix_args[1])
+    )
+    var indices = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=matrix_args[2])
+    )
+    var n_docs = Int(py=matrix_args[3])
+
+    var bmax = UnsafePointer[Float32, MutExternalOrigin](
+        unsafe_from_address=Int(py=bmw_args[0])
+    )
+    var boff = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=bmw_args[1])
+    )
+    var block_size = Int(py=bmw_args[2])
+
+    var queries = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=queries_args[0])
+    )
+    var offsets = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=queries_args[1])
+    )
+    var batch = Int(py=queries_args[2])
+
+    var scores_out = UnsafePointer[Float32, MutExternalOrigin](
+        unsafe_from_address=Int(py=out_args[0])
+    )
+    var ids_out = UnsafePointer[Int32, MutExternalOrigin](
+        unsafe_from_address=Int(py=out_args[1])
+    )
+    var k = Int(py=out_args[2])
+    var num_workers = Int(py=out_args[3])
+
+    retrieve_batch_bmw_into(
+        data, indptr, indices, n_docs,
+        bmax, boff, block_size,
+        queries, offsets, batch,
+        k, scores_out, ids_out, num_workers,
+    )
+    return PythonObject(None)
+
+
 @export
 def PyInit_kernel() -> PythonObject:
     try:
@@ -407,6 +468,7 @@ def PyInit_kernel() -> PythonObject:
         m.def_function[topk]("topk")
         m.def_function[csc_score]("csc_score")
         m.def_function[retrieve_batch]("retrieve_batch")
+        m.def_function[retrieve_batch_bmw]("retrieve_batch_bmw")
         return m.finalize()
     except e:
         abort(String("failed to create module: ", e))

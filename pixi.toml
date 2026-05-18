@@ -14,7 +14,7 @@ platforms = ["linux-64", "osx-arm64"]
 # instructions, so the .so loads with SIGILL on the same machine that built
 # it. x86-64-v3 sacrifices VNNI/AVX-512 throughput for portability across
 # the heterogeneous runner pool.
-build = { cmd = "mkdir -p build && mojo build src/mojo_bm25s/lib.mojo --emit shared-lib --target-cpu=x86-64-v3 -o build/mojo_bm25s.so", outputs = ["build/mojo_bm25s.so"], inputs = ["src/mojo_bm25s/lib.mojo", "src/mojo_bm25s/scoring.mojo", "src/mojo_bm25s/topk.mojo", "src/mojo_bm25s/csc.mojo", "src/mojo_bm25s/retrieve.mojo"] }
+build = { cmd = "mkdir -p build && mojo build src/mojo_bm25s/lib.mojo --emit shared-lib --target-cpu=x86-64-v3 -o build/mojo_bm25s.so", outputs = ["build/mojo_bm25s.so"], inputs = ["src/mojo_bm25s/lib.mojo", "src/mojo_bm25s/scoring.mojo", "src/mojo_bm25s/topk.mojo", "src/mojo_bm25s/csc.mojo", "src/mojo_bm25s/retrieve.mojo", "src/mojo_bm25s/retrieve_bmw.mojo"] }
 test = { cmd = "pytest tests/", depends-on = ["build"] }
 bench = { cmd = "python benchmarks/run.py", depends-on = ["build"] }
 

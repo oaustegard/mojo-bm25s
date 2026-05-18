@@ -100,6 +100,9 @@ _DATA_FILE = "data.bin"
 _INDICES_FILE = "indices.bin"
 _INDPTR_FILE = "indptr.bin"
 _NONOCCURRENCE_FILE = "nonoccurrence.bin"
+# BMW (issue #33) augmentation — both files present together or both absent.
+_BLOCK_MAX_FILE = "block_max_impacts.bin"
+_BLOCK_OFFSETS_FILE = "block_offsets.bin"
 
 # Methods whose stored data was offset by a per-token nonoccurrence
 # scalar at index time. Mirror of index_builder._METHODS_REQUIRING_NONOCCURRENCE.
@@ -111,6 +114,10 @@ class LoadedIndex:
     """Result of ``load_index``. All array fields are numpy arrays with
     the documented dtypes; ``nonoccurrence`` is ``None`` unless the
     saved index used a method that requires it.
+
+    Block-Max WAND fields (issue #33) are ``None`` unless the saved index
+    included them. Backward compat: legacy indexes (saved before #33)
+    load with these three fields == None.
     """
     data: np.ndarray            # float32, shape (nnz,)
     indices: np.ndarray         # int32, shape (nnz,)
@@ -124,6 +131,10 @@ class LoadedIndex:
     b: float
     delta: float
     nonoccurrence: Optional[np.ndarray] = None  # float32 (n_vocab,) or None
+    # BMW (issue #33). Present-together-or-both-absent invariant.
+    block_max_impacts: Optional[np.ndarray] = None  # float32, (n_blocks,)
+    block_offsets: Optional[np.ndarray] = None      # int32, (n_vocab + 1,)
+    block_size: Optional[int] = None
 
 
 # ----------------------------------------------------------------------
@@ -205,6 +216,9 @@ def save_index(
     method: str,
     idf_method: str,
     nonoccurrence: Optional[np.ndarray] = None,
+    block_max_impacts: Optional[np.ndarray] = None,
+    block_offsets: Optional[np.ndarray] = None,
+    block_size: Optional[int] = None,
 ) -> None:
     """Persist a built index to ``index_dir`` atomically.
 
@@ -227,6 +241,17 @@ def save_index(
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
 
+    # BMW: all three (block_max_impacts, block_offsets, block_size) must
+    # be provided together or all None. Mixed state is a caller bug.
+    bmw_args = (block_max_impacts, block_offsets, block_size)
+    bmw_provided = sum(1 for a in bmw_args if a is not None)
+    if bmw_provided not in (0, 3):
+        raise ValueError(
+            "block_max_impacts, block_offsets, and block_size must all be "
+            "provided together, or all be None"
+        )
+    has_bmw = bmw_provided == 3
+
     # --- meta.json -------------------------------------------------------
     meta = {
         "version": _FORMAT_VERSION,
@@ -240,6 +265,8 @@ def save_index(
         "l_avg": float(l_avg),
         "dtype": "float32",
     }
+    if has_bmw:
+        meta["block_size"] = int(block_size)
     (staging / _META_FILE).write_text(
         json.dumps(meta, ensure_ascii=False, sort_keys=True),
         encoding="utf-8",
@@ -271,6 +298,15 @@ def save_index(
         if nonoccurrence is not None:
             # No-op; we don't write the file. Document via doc, not error.
             pass
+
+    # --- BMW (conditional) ----------------------------------------------
+    if has_bmw:
+        np.ascontiguousarray(block_max_impacts, dtype=_DATA_DTYPE).tofile(
+            staging / _BLOCK_MAX_FILE,
+        )
+        np.ascontiguousarray(block_offsets, dtype=_INDEX_DTYPE).tofile(
+            staging / _BLOCK_OFFSETS_FILE,
+        )
 
     # --- Atomic finalize ------------------------------------------------
     # If the target already exists, replace it. ``os.replace`` is the
@@ -397,6 +433,50 @@ def load_index(index_dir: Union[str, Path]) -> LoadedIndex:
             )
         nonoccurrence = None
 
+    # --- BMW (conditional, issue #33) --------------------------------
+    bmax_path = index_dir / _BLOCK_MAX_FILE
+    boff_path = index_dir / _BLOCK_OFFSETS_FILE
+    bmax_present = bmax_path.exists()
+    boff_present = boff_path.exists()
+    if bmax_present != boff_present:
+        raise ValueError(
+            f"BMW metadata partially present: "
+            f"{_BLOCK_MAX_FILE} {'present' if bmax_present else 'absent'}, "
+            f"{_BLOCK_OFFSETS_FILE} {'present' if boff_present else 'absent'}"
+        )
+    block_max_impacts: Optional[np.ndarray]
+    block_offsets: Optional[np.ndarray]
+    block_size: Optional[int]
+    if bmax_present and boff_present:
+        block_max_impacts = np.fromfile(bmax_path, dtype=_DATA_DTYPE)
+        block_offsets = np.fromfile(boff_path, dtype=_INDEX_DTYPE)
+        if block_offsets.shape != (n_vocab + 1,):
+            raise ValueError(
+                f"block_offsets shape {block_offsets.shape} does not match "
+                f"(n_vocab + 1,) = ({n_vocab + 1},)"
+            )
+        expected_n_blocks = int(block_offsets[-1])
+        if block_max_impacts.shape != (expected_n_blocks,):
+            raise ValueError(
+                f"block_max_impacts shape {block_max_impacts.shape} does not "
+                f"match block_offsets[-1] = {expected_n_blocks}"
+            )
+        block_max_impacts = np.ascontiguousarray(
+            block_max_impacts, dtype=np.float32,
+        )
+        block_offsets = np.ascontiguousarray(block_offsets, dtype=np.int32)
+        bs = meta.get("block_size")
+        if bs is None:
+            raise ValueError(
+                "BMW metadata files present but meta.json is missing the "
+                "'block_size' field"
+            )
+        block_size = int(bs)
+    else:
+        block_max_impacts = None
+        block_offsets = None
+        block_size = None
+
     return LoadedIndex(
         data=data,
         indices=indices,
@@ -410,4 +490,7 @@ def load_index(index_dir: Union[str, Path]) -> LoadedIndex:
         b=b,
         delta=delta,
         nonoccurrence=nonoccurrence,
+        block_max_impacts=block_max_impacts,
+        block_offsets=block_offsets,
+        block_size=block_size,
     )

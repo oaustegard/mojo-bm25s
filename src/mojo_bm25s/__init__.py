@@ -379,6 +379,7 @@ from .vocab import Vocab  # noqa: E402
 from .index_builder import build_index  # noqa: E402
 from .io import save_index, load_index  # noqa: E402
 from .retriever import Retriever  # noqa: E402
+from .bmw import build_block_max_metadata, retrieve_batch_bmw  # noqa: E402
 
 
 __all__ = [
@@ -400,4 +401,6 @@ __all__ = [
     "save_index",
     "load_index",
     "Retriever",
+    "build_block_max_metadata",
+    "retrieve_batch_bmw",
 ]
